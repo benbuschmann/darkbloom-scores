@@ -2,7 +2,7 @@
 
 A small public website comparing all Darkbloom model scores over time. One
 Python service collects public capacity and pricing, saves SQLite history, and
-serves a plain HTML/SVG chart. No API key, paid database, provider installation,
+serves plain HTML/SVG charts. No API key, paid database, provider installation,
 or running Mac is needed.
 
 **Deploying with Dokploy? Start with [DEPLOY_DOKPLOY.md](DEPLOY_DOKPLOY.md).**
@@ -10,16 +10,24 @@ or running Mac is needed.
 ## Features and scope
 
 - Combined score chart with abbreviated, clickable endpoint labels.
+- Per-model charts ranked by latest score: green loaded-model and blue request
+  15-minute averages, a toggleable light-gray live request line, and a toggleable
+  saved-score strip. Each card shows its latest average utilization and score.
 - 30m, 1h, **2h default**, 4h, 12h, 24h, 7d, and 30d chart windows.
+- One time-window control and one cached response shared by all charts.
 - Minute collection and 15-minute rolling scores; collection gaps remain gaps.
-- 31-day score retention; visitor analytics handled separately by Cloudflare.
+- 31-day public score/count retention; visitor analytics handled separately by Cloudflare.
 - Dockerfile, offline tests, GitHub Actions image and persistence checks.
 
-This is only the score website. It does **not** include the private tracker,
+This is only the public model-chart website. It does **not** include the private tracker,
 personal token earnings, fleet machine identities, existing databases, or any
 credentials. The repo starts without historical data. Collection begins when
 deployed; earlier windows stay empty unless public score history is imported
 separately.
+
+Existing deployments keep their saved scores. The added load/request fields
+start collecting after this update is deployed; old counts remain unknown,
+not zero. A full 15-minute count average builds over the first 15 minutes.
 
 ## Scoring
 
@@ -44,6 +52,24 @@ Public sources, accessed without credentials:
 - `https://console.darkbloom.dev/api/models/capacity`
 - `https://api.darkbloom.dev/v1/pricing`
 
+### Load and request charts
+
+Count averages use elapsed time in the last **900 seconds**, not 15 arbitrary
+observations or chart buckets. Each count is held until the next sample;
+intervals longer than 150 seconds are excluded as collection gaps. Partial
+coverage is labeled. A first observation shows provisional counts with zero
+minutes observed. The headline percentage is average requests divided by
+average loaded models. It is not the mean of individual sample percentages
+used by the unchanged manager score formula above.
+
+Green, blue, and gray share one count scale. The right-hand green reference is
+100%; blue can cross above it. Gray is the latest **minute-sampled** request
+count, not a continuous feed; its right-hand percentage also uses the latest
+average loaded count so the labels match the common scale. Zero loaded capacity
+shows an unknown percentage rather than infinity. The amber score strip has its
+own scale and the same timeline. Toggle choices survive refreshes/window changes
+within the page, without storing any visitor identifiers.
+
 ## Run locally
 
 Python 3.10+ on macOS/Linux; Docker uses Python 3.12. No pip packages.
@@ -51,6 +77,7 @@ Python 3.10+ on macOS/Linux; Docker uses Python 3.12. No pip packages.
 ```sh
 python3 fetch_manager.py
 python3 -m unittest -v
+node --test test_frontend.js
 python3 server.py serve
 ```
 
@@ -98,7 +125,15 @@ credentials. CLI flags override corresponding environment variables; see
 Only the chart's supported durations in seconds are accepted. Up to 12h, the
 API returns minute points; 24h uses 2-minute buckets, 7d uses 15-minute buckets,
 and 30d uses hourly buckets. Each bucket returns its **last** score, not another
-average. The UI marks the feed delayed after three minutes.
+average. Counts and their saved 15-minute averages use that same last row; they
+are never recomputed from downsampled points. The UI marks the feed delayed
+after three minutes.
+
+API schema version 2 adds `loaded`, `requests`, `available_to_load`,
+`average_loaded`, `average_requests`, and `average_coverage_seconds` to each
+score row. Older rows have nulls in these fields. All charts use the existing
+`/api/scores` cache: a bounded 30-second application cache and age-adjusted
+shared-cache headers. No new Cloudflare rule or cache-key change is needed.
 
 ## Cloudflare analytics and privacy
 

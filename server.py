@@ -16,6 +16,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +29,8 @@ from warm_model_manager import (
     DEFAULT_WEIGHTS,
     CapacitySample,
     ModelPrice,
-    fetch_capacity,
+    get_json,
+    pressure_samples,
     fetch_model_prices,
 )
 
@@ -47,6 +49,54 @@ SAMPLE_WINDOW_SECONDS = 15 * 60
 SCORE_RETENTION_SECONDS = 31 * 86400
 SCORE_CACHE_SECONDS = 30
 WEB_PATH = Path(__file__).with_name("index.html")
+COUNT_GAP_SECONDS = 150
+
+
+@dataclass(frozen=True)
+class PublicCapacitySample(CapacitySample):
+    available_to_load: int | None = None
+
+
+def fetch_capacity(base_url: str) -> dict[str, PublicCapacitySample]:
+    """One public request supplies both the upstream score inputs and counts."""
+    payload = get_json(f"{base_url.rstrip('/')}/api/models/capacity")
+    rows = [row for row in payload.get("models", []) if isinstance(row, dict)]
+    samples = pressure_samples(rows)
+    availability = {}
+    for row in rows:
+        model_id = str(row.get("id") or row.get("model_id") or "")
+        value = row.get("cold_providers")
+        try:
+            availability[model_id] = max(0, int(value)) if value is not None else None
+        except (ValueError, TypeError, OverflowError):
+            availability[model_id] = None
+    return {
+        key: PublicCapacitySample(key, sample.warm_providers, sample.active_requests,
+                                  sample.pressure, availability.get(key))
+        for key, sample in samples.items()
+    }
+
+
+def count_averages(samples: list[tuple], now: int) -> tuple[float | None, float | None, int]:
+    """Time-weighted counts over 900 elapsed seconds, excluding collection gaps."""
+    loaded_area = requests_area = 0.0
+    covered = 0
+    for previous, current in zip(samples, samples[1:]):
+        if previous[1] is None or previous[2] is None:
+            continue
+        if not 0 < current[0] - previous[0] <= COUNT_GAP_SECONDS:
+            continue
+        elapsed = min(now, current[0]) - max(now - SAMPLE_WINDOW_SECONDS, previous[0])
+        if elapsed > 0:
+            loaded_area += previous[1] * elapsed
+            requests_area += previous[2] * elapsed
+            covered += elapsed
+    if covered:
+        return loaded_area / covered, requests_area / covered, covered
+    # The initial observation has no measured duration yet. Do not fabricate
+    # earlier counts from old scores or extend a stale count across an outage.
+    latest = samples[-1] if samples else (now, None, None)
+    return latest[1], latest[2], 0
 
 
 def iso_utc(timestamp: int) -> str:
@@ -87,6 +137,20 @@ class ScoreStore:
                 );
                 CREATE INDEX IF NOT EXISTS scores_time ON scores(at);
             """)
+            # Additive migration: existing score rows stay valid; unavailable
+            # historical counts remain NULL, not invented zeroes.
+            for table, additions in {
+                "pressure_samples": {"loaded": "INTEGER", "requests": "INTEGER"},
+                "scores": {
+                    "loaded": "INTEGER", "requests": "INTEGER", "available_to_load": "INTEGER",
+                    "average_loaded": "REAL", "average_requests": "REAL",
+                    "average_coverage_seconds": "INTEGER",
+                },
+            }.items():
+                columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                for name, column_type in additions.items():
+                    if name not in columns:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {column_type}")
 
     @contextmanager
     def connect(self):
@@ -115,8 +179,8 @@ class ScoreStore:
         with self.connect() as db:
             for model_id, sample in capacity.items():
                 db.execute(
-                    "INSERT OR IGNORE INTO pressure_samples(at,model_id,pressure) VALUES(?,?,?)",
-                    (at, model_id, sample.pressure),
+                    "INSERT OR IGNORE INTO pressure_samples(at,model_id,pressure,loaded,requests) VALUES(?,?,?,?,?)",
+                    (at, model_id, sample.pressure, sample.warm_providers, sample.active_requests),
                 )
                 samples = db.execute(
                     "SELECT pressure FROM pressure_samples WHERE model_id=? AND at>? AND at<=? "
@@ -128,10 +192,19 @@ class ScoreStore:
                 blended = price.blended_usd
                 weight = DEFAULT_WEIGHTS.get(model_id, 1.0)
                 score = average * blended * weight if average is not None and blended is not None else None
-                records.append((at, model_id, score, average, blended, weight, len(samples)))
+                counts = db.execute(
+                    "SELECT at,loaded,requests FROM pressure_samples WHERE model_id=? AND at>=? AND at<=? ORDER BY at",
+                    (model_id, at - SAMPLE_WINDOW_SECONDS - COUNT_GAP_SECONDS, at),
+                ).fetchall()
+                average_loaded, average_requests, coverage = count_averages(counts, at)
+                records.append((at, model_id, score, average, blended, weight, len(samples),
+                                sample.warm_providers, sample.active_requests,
+                                getattr(sample, "available_to_load", None),
+                                average_loaded, average_requests, coverage))
             db.executemany(
-                "INSERT OR IGNORE INTO scores(at,model_id,score,average_pressure,blended_price_usd,model_weight,sample_count) "
-                "VALUES(?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO scores(at,model_id,score,average_pressure,blended_price_usd,model_weight,sample_count,"
+                "loaded,requests,available_to_load,average_loaded,average_requests,average_coverage_seconds) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 records,
             )
             db.execute("DELETE FROM pressure_samples WHERE at<?", (at - 3600,))
@@ -166,7 +239,7 @@ class ScoreStore:
 
     def import_load_csv(self, csv_path: Path, now: int) -> int:
         """Seed the rolling pressure window from public model-load snapshots."""
-        latest_by_minute: dict[tuple[int, str], float] = {}
+        latest_by_minute: dict[tuple[int, str], tuple[float, int, int]] = {}
         cutoff = now - SAMPLE_WINDOW_SECONDS
         with csv_path.open(newline="", encoding="utf-8") as handle:
             for row in csv.DictReader(handle):
@@ -178,13 +251,13 @@ class ScoreStore:
                     loaded = max(0, int(row["loaded"]))
                     requests = max(0, int(row["in_progress"]))
                     if model_id:
-                        latest_by_minute[(observed // 60 * 60, model_id)] = requests / max(1, loaded)
+                        latest_by_minute[(observed // 60 * 60, model_id)] = (requests / max(1, loaded), loaded, requests)
                 except (KeyError, ValueError, OverflowError):
                     continue
         with self.connect() as db:
             db.executemany(
-                "INSERT OR IGNORE INTO pressure_samples(at,model_id,pressure) VALUES(?,?,?)",
-                ((at, model_id, pressure) for (at, model_id), pressure in latest_by_minute.items()),
+                "INSERT OR IGNORE INTO pressure_samples(at,model_id,pressure,loaded,requests) VALUES(?,?,?,?,?)",
+                ((at, model_id, *counts) for (at, model_id), counts in latest_by_minute.items()),
             )
         return len(latest_by_minute)
 
@@ -201,21 +274,26 @@ class ScoreStore:
                     FROM scores WHERE at >= ?
                     GROUP BY model_id, bucket
                 )
-                SELECT scores.at, scores.model_id, scores.score
+                SELECT scores.at, scores.model_id, scores.score, scores.loaded, scores.requests,
+                       scores.available_to_load, scores.average_loaded, scores.average_requests,
+                       scores.average_coverage_seconds
                 FROM scores JOIN last_in_bucket
                   ON scores.model_id = last_in_bucket.model_id AND scores.at = last_in_bucket.at
                 ORDER BY scores.at, scores.model_id
             """, (bucket, now - window)).fetchall()
         return {
+            "schema_version": 2,
             "generated_at": iso_utc(now),
             "last_sample_at": iso_utc(latest) if latest is not None else None,
             "window_seconds": window,
             "bucket_seconds": bucket,
             "rows": [
-                {"observed_at": iso_utc(row["at"]), "model_id": row["model_id"], "score": row["score"]}
+                {"observed_at": iso_utc(row["at"]), **{key: row[key] for key in row.keys() if key != "at"}}
                 for row in rows
             ],
         }
+
+
 class PriceCache:
     def __init__(self) -> None:
         self.prices: dict[str, ModelPrice] = {}
@@ -300,6 +378,9 @@ class ScoreHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
             self.send_bytes(WEB_PATH.read_bytes(), "text/html; charset=utf-8")
+            return
+        if parsed.path == "/model-charts.js":
+            self.send_bytes(WEB_PATH.with_name("model-charts.js").read_bytes(), "text/javascript; charset=utf-8")
             return
         if parsed.path == "/healthz":
             self.send_json({"ok": True})

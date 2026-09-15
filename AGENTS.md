@@ -11,8 +11,11 @@ manager and not the owner's private local tracker.
   personal earnings, machine/provider identities, or deployment credentials.
 - Do not modify the downloaded manager module. Its upstream commit and hash
   are pinned in `fetch_manager.py`; review upstream changes before updating.
-- Run `python3 fetch_manager.py`, `python3 -m unittest -v`, and syntax checks
+- Run `python3 fetch_manager.py`, `python3 -m unittest -v`,
+  `node --test test_frontend.js`, and syntax checks
   before publishing changes. GitHub Actions also checks the Docker image.
+- Per-model charts share the existing cached `/api/scores` response. Preserve
+  Cloudflare cache headers and keys; do not invent historical counts from scores.
 - Dokploy handoff is in `DEPLOY_DOKPLOY.md`: one replica, persistent `/data`,
   container port 8788, HTTPS, Cloudflare analytics, score-retention checks.
 - Keep repo publication separate from deployment. Do not claim the site is

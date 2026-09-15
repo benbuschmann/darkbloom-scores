@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Darkbloom model scores</title>
   <style>
-    :root { color-scheme:dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#f0f6fc; --muted:#8b949e; --blue:#58a6ff; --green:#3fb950; }
+    :root { color-scheme:dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#f0f6fc; --muted:#8b949e; --blue:#58a6ff; --green:#3fb950; --score:#e3b341; --live:#d0d7de; }
     * { box-sizing:border-box; }
     body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
     main { width:min(1120px,calc(100% - 32px)); margin:36px auto 72px; }
@@ -44,6 +44,36 @@
     .chart-actions { display:flex; justify-content:flex-end; min-height:26px; }
     .chart-actions button { font-size:10px; }
     .explain { color:var(--muted); font-size:11px; }
+    .models-heading { margin:28px 0 14px; }
+    .models-heading p { color:var(--muted); font-size:11px; }
+    .model-card { margin-top:14px; }
+    .model-about { min-width:0; flex:1; }
+    .model-id { margin-top:6px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+    .model-availability,.model-note { color:var(--muted); font-size:10px; margin-top:6px; }
+    .model-metric { text-align:right; }
+    .metric-label { color:var(--muted); font-size:10px; text-transform:uppercase; }
+    .metric-numbers { display:flex; gap:14px; align-items:baseline; justify-content:flex-end; margin-top:4px; }
+    .metric-usage { color:var(--blue); font-size:32px; line-height:1.1; }
+    .metric-score { color:var(--score); font-size:19px; padding-left:14px; border-left:1px solid var(--line); }
+    .model-legend { display:flex; align-items:center; flex-wrap:wrap; gap:10px 16px; margin-top:14px; font-size:11px; }
+    .legend-title { text-transform:uppercase; }
+    .legend-key { color:var(--muted); }
+    .legend-key::before { content:''; display:inline-block; width:22px; height:2px; background:currentColor; margin-right:6px; vertical-align:middle; }
+    button.legend-key { padding:3px 0; border:0; border-radius:0; }
+    button.legend-key[aria-pressed="false"] { opacity:.4; text-decoration:line-through; }
+    .model-card .loaded { color:var(--green); }
+    .model-card .requests { color:var(--blue); }
+    .model-card .live { color:var(--live); }
+    .model-card .score { color:var(--score); }
+    .model-chart { min-height:0; }
+    .model-line { fill:none; stroke:currentColor; stroke-width:2.6; }
+    .model-line.live { stroke-width:1.2; opacity:.5; }
+    .model-line.score { stroke-width:2; }
+    .model-point { fill:currentColor; stroke:var(--panel); stroke-width:1.5; }
+    .model-guide { stroke:currentColor; stroke-dasharray:2 4; opacity:.3; }
+    .model-value { fill:currentColor; font-size:10px; font-weight:600; }
+    .model-link { fill:none; stroke:currentColor; stroke-width:1; opacity:.7; }
+    @media(max-width:620px) { .model-metric { text-align:left; width:100%; } .metric-numbers { justify-content:flex-start; } .metric-usage { font-size:28px; } .model-legend { gap:8px 12px; font-size:10px; } .model-value { font-size:9px; } }
     footer { margin-top:16px; color:var(--muted); font-size:10px; }
     @media(max-width:700px) { header { display:block; } .top-link { display:inline-block; margin-top:12px; } }
     @media(max-width:500px) { h1 { font-size:23px; } .card { padding:12px; } .chart .endpoint-label { font-size:8px; } }
@@ -77,17 +107,22 @@
       <div id="chart-actions" class="chart-actions"></div>
       <p class="explain">Labels sit beside the newest point when its score is at least 0.0001. Click a label to hide that line. Collection gaps stay gaps.</p>
     </section>
+    <div class="models-heading"><h2>Model load &amp; requests</h2><p>Same time window as above · sorted by latest saved score · 15-minute averages, not snapshot counts</p></div>
+    <section id="model-cards" aria-label="Per-model charts"></section>
   </main>
+  <script src="model-charts.js"></script>
   <script>
     const chart = document.querySelector('#chart');
     const actions = document.querySelector('#chart-actions');
     const status = document.querySelector('#status');
     const statusText = document.querySelector('#status-text');
     const hidden = new Set();
+    const modelCards = document.querySelector('#model-cards');
     const scoreFormat = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 4 });
     const colors = ['#58a6ff','#e3b341','#3fb950','#d2a8ff','#ff7b72','#79c0ff','#f2cc60','#56d4dd','#ffa657','#bc8cff','#7ee787','#ff9bce'];
     let windowSeconds = 7200;
     let data = null;
+    let refreshRequest = 0;
 
     function element(name, attributes = {}, value = '') {
       const node = document.createElementNS('http://www.w3.org/2000/svg', name);
@@ -210,12 +245,17 @@
         button.addEventListener('click',() => { hidden.clear(); render(); });
         actions.append(button);
       }
+      ModelCharts.render(modelCards, data);
     }
     async function refreshScores() {
+      const request = ++refreshRequest;
+      const requestedWindow = windowSeconds;
       try {
-        const response = await fetch(`api/scores?window=${windowSeconds}`);
+        const response = await fetch(`api/scores?window=${requestedWindow}`);
         if (!response.ok) throw new Error(`Feed returned ${response.status}`);
-        data = await response.json();
+        const payload = await response.json();
+        if (request !== refreshRequest) return;
+        data = payload;
         render();
         const age = data.last_sample_at ? Date.now()-Date.parse(data.last_sample_at) : Infinity;
         status.className = `status ${age < 180000 ? 'live' : 'stale'}`;
@@ -223,6 +263,7 @@
           ? `${age < 180000 ? 'Live' : 'Delayed'} · last score ${new Date(data.last_sample_at).toLocaleString()}${data.last_error ? ' · collector warning' : ''}`
           : 'Waiting for the first public score snapshot';
       } catch(error) {
+        if (request !== refreshRequest) return;
         status.className = 'status stale';
         statusText.textContent = `Could not load score feed: ${error.message}`;
       }

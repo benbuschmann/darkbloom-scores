@@ -17,6 +17,8 @@ jobs:
       - run: python -m unittest -v
       - name: Check frontend syntax
         run: node -e "new Function(require('fs').readFileSync('index.html','utf8').match(/<script>([\s\S]*?)<\/script>/)[1])"
+      - name: Test per-model chart logic
+        run: node --test test_frontend.js
       - name: Build image
         run: docker build -t darkbloom-scores:test .
       - name: Smoke-test container and persistence
@@ -25,6 +27,7 @@ jobs:
           docker run -d --name scores-test -p 127.0.0.1:8788:8788 -v scores-test:/data darkbloom-scores:test
           curl --fail --max-time 5 --retry 10 --retry-all-errors --retry-delay 1 http://127.0.0.1:8788/healthz
           curl --fail http://127.0.0.1:8788/api/scores?window=7200
+          curl --fail --output /dev/null http://127.0.0.1:8788/model-charts.js
           docker exec scores-test python -c "import sqlite3; c=sqlite3.connect('/data/scores.sqlite3'); c.execute('CREATE TABLE persistence_probe (value INTEGER)'); c.execute('INSERT INTO persistence_probe VALUES (42)'); c.commit()"
           docker stop scores-test
           docker rm scores-test

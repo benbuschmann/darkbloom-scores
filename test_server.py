@@ -1,6 +1,7 @@
 """Offline checks for public scores, privacy migration, and HTTP boundaries."""
 
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import threading
@@ -20,6 +21,61 @@ class ScoreFeedTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.store = score_feed.ScoreStore(Path(self.directory.name) / "scores.sqlite3")
+
+    def test_public_capacity_adapter_uses_one_request_and_retains_availability(self) -> None:
+        payload = {"models": [{"id": "model", "warm_providers": 10, "active_requests": 17, "cold_providers": 4}, None]}
+        with patch.object(score_feed, "get_json", return_value=payload) as fetch:
+            samples = score_feed.fetch_capacity("https://public.example/")
+        fetch.assert_called_once_with("https://public.example/api/models/capacity")
+        self.assertEqual(samples["model"].pressure, 1.7)
+        self.assertEqual(samples["model"].available_to_load, 4)
+
+    def test_count_averages_are_elapsed_time_weighted_and_exclude_gaps(self) -> None:
+        loaded, requests, seconds = score_feed.count_averages([(0, 10, 0), (60, 20, 20), (180, 30, 90)], 180)
+        self.assertAlmostEqual(loaded, 50 / 3)
+        self.assertAlmostEqual(requests, 40 / 3)
+        self.assertEqual(seconds, 180)
+        loaded, requests, seconds = score_feed.count_averages([(0, 10000, 20000), (600, 10, 20), (660, 20, 60)], 660)
+        self.assertEqual((loaded, requests, seconds), (10, 20, 60))
+        self.assertEqual(score_feed.count_averages([(0, None, None), (60, 3, 4)], 60), (3, 4, 0))
+
+    def test_count_average_window_is_exactly_900_seconds(self) -> None:
+        samples = [(840, 10000, 20000)] + [(at, 10, 20) for at in range(900, 1800, 60)] + [(1800, 50, 100)]
+        self.assertEqual(score_feed.count_averages(samples, 1800), (10, 20, 900))
+
+    def test_saved_counts_survive_restart_and_all_cached_windows(self) -> None:
+        now = 1_700_000_040
+        model = "new-counts"
+        price = ModelPrice(1, 1)
+        self.store.record({model: score_feed.PublicCapacitySample(model, 10, 20, 2, 7)}, {model: price}, price, now)
+        self.store.record({model: score_feed.PublicCapacitySample(model, 30, 60, 2, 5)}, {model: price}, price, now + 60)
+        self.store = score_feed.ScoreStore(self.store.path)
+        service = score_feed.ScoreService(self.store)
+        with patch.object(score_feed.time, "time", return_value=now + 60):
+            for window in score_feed.WINDOW_BUCKETS:
+                first, ttl = service.read_scores(window)
+                second, _ = service.read_scores(window)
+                self.assertIs(first, second)
+                self.assertGreater(ttl, 0)
+                latest = json.loads(first)["rows"][-1]
+                self.assertEqual((latest["loaded"], latest["requests"], latest["available_to_load"]), (30, 60, 5))
+                self.assertEqual((latest["average_loaded"], latest["average_requests"], latest["average_coverage_seconds"]), (10, 20, 60))
+
+    def test_original_schema_upgrade_preserves_scores_without_inventing_counts(self) -> None:
+        path = Path(self.directory.name) / "old-schema.sqlite3"
+        with sqlite3.connect(path) as db:
+            db.executescript("""
+                CREATE TABLE pressure_samples(at INTEGER, model_id TEXT, pressure REAL, PRIMARY KEY(at,model_id));
+                CREATE TABLE scores(at INTEGER, model_id TEXT, score REAL, average_pressure REAL,
+                  blended_price_usd REAL, model_weight REAL, sample_count INTEGER, PRIMARY KEY(at,model_id));
+                INSERT INTO scores VALUES(1700000040,'old-model',0.75,1.5,0.5,1,15);
+            """)
+        for _ in range(2):
+            old = score_feed.ScoreStore(path)
+            row = old.read(7200, 1_700_000_040)["rows"][0]
+            self.assertEqual(row["score"], 0.75)
+            for key in ("loaded", "requests", "average_loaded", "average_requests", "available_to_load"):
+                self.assertIsNone(row[key])
 
     def test_score_cache_reuses_serialized_results_per_window_and_expires(self) -> None:
         now = 1_700_000_040
@@ -211,6 +267,9 @@ class ScoreFeedTests(unittest.TestCase):
             self.assertIsNone(response.headers.get("Set-Cookie"))
         with urlopen(base + "/api/scores?window=7200", timeout=3) as response:
             self.assertEqual(json.load(response)["rows"], [])
+        with urlopen(base + "/model-charts.js", timeout=3) as response:
+            self.assertIn("text/javascript", response.headers["Content-Type"])
+            self.assertIn(b"Loaded models", response.read())
         with urlopen(base + "/healthz", timeout=3) as response:
             self.assertTrue(json.load(response)["ok"])
             self.assertEqual(response.headers["Cache-Control"], "no-store")

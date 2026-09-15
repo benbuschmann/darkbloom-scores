@@ -1,6 +1,6 @@
 # Handoff: deploy Darkbloom Scores with Dokploy
 
-Goal: host this public score-only site on the owner's new Dokploy server.
+Goal: host these public model-score and load charts on the owner's Dokploy server.
 This repository is source, **not evidence of a deployment**. Do not deploy
 the private local tracker or copy any API keys/personal data.
 
@@ -72,6 +72,20 @@ the remaining lifetime, and that new score timestamps appear after expiration.
 Different Cloudflare locations maintain separate caches. A restart empties the
 app cache and leaves the database volume intact.
 
+### Adding per-model charts
+
+The per-model load/request charts use the same cached `/api/scores` response
+and all eight existing window keys. Keep the deployed Cloudflare cache rule
+unchanged. The image includes the new `model-charts.js` asset; no new service,
+environment variable, scheduled job, or proxy route is needed.
+
+On startup, an additive SQLite migration adds nullable count/average columns.
+Preserve the current `/data` volume: existing scores remain visible and new
+load/request history starts with the first collection after deployment.
+Do not backfill counts from scores. A full time-weighted count average requires
+15 minutes of covered history; partial coverage is labeled in the chart.
+Collection remains once per minute, and the score formula is unchanged.
+
 ## Analytics: Cloudflare only
 
 In Cloudflare Web Analytics, add/select this hostname and enable automatic
@@ -108,7 +122,11 @@ Preserve the named `/data` volume and one replica.
 2. `/healthz` should return `{"ok":true}`.
 3. `/api/scores?window=7200` must receive new timestamped scores. Initial
    scores use partial history; full rolling averages build over 15 minutes.
-4. Check model lines, label toggles, and every time-window button.
+4. Check combined model lines, label toggles, and every time-window button.
+   Per-model cards should appear below, ranked by score. Verify live-request
+   and saved-score toggles, values above 100%, and that all charts follow the
+   selected window. API rows should contain the new count fields (null for
+   old history, populated for fresh samples).
 5. The old public traffic cards must be absent. GET `/api/traffic` and POST
    `/api/view` / `/api/heartbeat` must return 404, and the browser must no
    longer send these requests. Check Cloudflare Web Analytics separately.
@@ -145,7 +163,7 @@ imports to GitHub. Old rows outside retention are pruned normally.
   volume backup. Copying a live `.sqlite3` file alone can miss WAL data.
 - Keep backups private with bounded retention; older backups may still contain
   the retired visitor data.
-- Scores are retained 31 days, pressure samples one hour. SQLite reuses
+- Scores and count history are retained 31 days, pressure samples one hour. SQLite reuses
   freed pages, so file size need not shrink immediately.
 - `/healthz` checks HTTP liveness. Monitor `last_sample_at` and `last_error`
   in `/api/scores` for upstream collection failures.
