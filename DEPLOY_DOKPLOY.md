@@ -37,34 +37,40 @@ A generated domain is an option. Check DNS and certificate availability for
 the chosen hostname; use HTTPS for the public site. Do **not** publish 8788
 directly to the internet or change unrelated applications/routes.
 
-Set in Dokploy's environment:
+The current public hostname is `darkbloom.benbuschmann.com`. Runtime defaults
+are in the Dockerfile; no visitor-attribution environment variables are needed.
+Runtime requires outbound HTTPS to Darkbloom's public feeds, and builds require
+GitHub access for the checksum-pinned dependency.
 
-```text
-PUBLIC_ORIGIN=https://your-chosen-hostname
-```
+## Analytics: Cloudflare only
 
-Other runtime defaults are in the Dockerfile. Configure the origin/domain,
-then deploy. Runtime needs outbound HTTPS to Darkbloom's public capacity and
-pricing endpoints; builds also need GitHub access for the pinned dependency.
+In Cloudflare Web Analytics, add/select this hostname and enable automatic
+setup for a proxied site. This is a Cloudflare account setting, not a Dokploy
+setting or a GitHub workflow. The app permits the edge-injected beacon in its
+Content Security Policy and does not embed a second tracker or require an
+analytics token. Confirm a beacon loads and data appears in Cloudflare's
+dashboard; pushing the repo alone does not enable Web Analytics.
 
-## Correct visitor IPs behind Traefik
+No app-side IP/session collection remains. No trusted proxy CIDR list needs
+updating after network restarts. Old `PUBLIC_ORIGIN` and
+`TRUSTED_PROXY_CIDRS` environment variables can be removed; they are ignored.
+Remove the corresponding legacy CLI flags if a custom run command uses them.
 
-Forwarded IP headers are ignored by default. Until proxy trust is configured,
-the app sees proxy IPs and unique-IP numbers will be inaccurate.
+**Upgrade migration:** starting the new image removes the old visitor table
+and its indexes, with SQLite secure deletion enabled, without deleting model
+score history. Existing backups/snapshots and proxy/CDN logs are not touched;
+review their retention separately. Lost visitor statistics are recoverable
+only from a separate existing backup, not from the app.
 
-1. Inspect the actual network and peer address used by the trusted Traefik
-   proxy when connecting to this container.
-2. Set `TRUSTED_PROXY_CIDRS` to that specific proxy address/subnet. **Do not
-   guess a subnet or trust `0.0.0.0/0`, `::/0`, or every private network.**
-3. Traefik must sanitize forwarded headers from internet clients; do not
-   enable its insecure forwarded-header trust mode. If a CDN is in front,
-   configure only its verified proxy ranges at Traefik.
-4. Confirm `X-Forwarded-For` and `X-Forwarded-Proto`, then test two known
-   clients. A visitor-supplied spoofed header must not change the stored IP.
+## Deploying a pushed change
 
-Keep raw addresses/reports private. Application IP records are pruned after
-seven days; proxy/CDN logs and backups have separate retention. Review those
-settings and the footer disclosure before launch.
+The GitHub workflow tests the code and Docker image; it does **not** deploy.
+Dokploy must watch the repository's `main` branch through its configured GitHub
+integration/auto-deploy option or receive a deployment webhook for pushes.
+Check the integration and webhook delivery in the owner's Dokploy/GitHub
+settings if a push does not create a deployment. Do not publish webhook
+secrets or change unrelated services. A manual Deploy/Rebuild is the fallback.
+Preserve the named `/data` volume and one replica.
 
 ## Acceptance checks
 
@@ -73,8 +79,9 @@ settings and the footer disclosure before launch.
 3. `/api/scores?window=7200` must receive new timestamped scores. Initial
    scores use partial history; full rolling averages build over 15 minutes.
 4. Check model lines, label toggles, and every time-window button.
-5. `/api/traffic` must return aggregates only; heartbeat requests should
-   succeed over the public HTTPS origin. Never expose raw IPs via HTTP.
+5. The old public traffic cards must be absent. GET `/api/traffic` and POST
+   `/api/view` / `/api/heartbeat` must return 404, and the browser must no
+   longer send these requests. Check Cloudflare Web Analytics separately.
 6. `/.env`, `/data/scores.sqlite3`, `/api/earnings`, and `/api/providers`
    must return 404.
 7. Note an existing score, redeploy using the **same volume**, and verify
@@ -106,11 +113,13 @@ imports to GitHub. Old rows outside retention are pruned normally.
   make them world-writable as a workaround.
 - Use SQLite's online backup API, or stop the service for a consistent
   volume backup. Copying a live `.sqlite3` file alone can miss WAL data.
-- Keep backups private with bounded retention; they may contain visitor IPs.
+- Keep backups private with bounded retention; older backups may still contain
+  the retired visitor data.
 - Scores are retained 31 days, pressure samples one hour. SQLite reuses
   freed pages, so file size need not shrink immediately.
 - `/healthz` checks HTTP liveness. Monitor `last_sample_at` and `last_error`
   in `/api/scores` for upstream collection failures.
 
-Official references: [Dokploy applications](https://docs.dokploy.com/docs/core/applications)
-and [remote servers](https://docs.dokploy.com/docs/core/remote-servers).
+Official references: [Dokploy applications](https://docs.dokploy.com/docs/core/applications),
+[remote servers](https://docs.dokploy.com/docs/core/remote-servers), and
+[Cloudflare automatic analytics](https://developers.cloudflare.com/web-analytics/get-started/#sites-proxied-through-cloudflare).

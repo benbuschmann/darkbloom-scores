@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-import ipaddress
 import json
 import os
-import re
 import signal
 import sqlite3
 import threading
@@ -47,8 +45,6 @@ WINDOW_BUCKETS = {
 }
 SAMPLE_WINDOW_SECONDS = 15 * 60
 SCORE_RETENTION_SECONDS = 31 * 86400
-IP_RETENTION_SECONDS = 7 * 86400
-SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{10,80}$")
 WEB_PATH = Path(__file__).with_name("index.html")
 
 
@@ -66,6 +62,11 @@ class ScoreStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
+            # Retire only the old visitor collection, never score history.
+            # secure_delete clears freed SQLite pages; external backups/logs
+            # have their own retention and are not touched by this migration.
+            db.execute("PRAGMA secure_delete=ON")
+            db.execute("DROP TABLE IF EXISTS traffic_events")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS pressure_samples (
                     at INTEGER NOT NULL,
@@ -84,17 +85,6 @@ class ScoreStore:
                     PRIMARY KEY (at, model_id)
                 );
                 CREATE INDEX IF NOT EXISTS scores_time ON scores(at);
-                CREATE TABLE IF NOT EXISTS traffic_events (
-                    id INTEGER PRIMARY KEY,
-                    at INTEGER NOT NULL,
-                    session_id TEXT NOT NULL,
-                    ip TEXT NOT NULL,
-                    kind TEXT NOT NULL CHECK (kind IN ('view','heartbeat')),
-                    watched_seconds INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX IF NOT EXISTS traffic_events_time ON traffic_events(at);
-                CREATE INDEX IF NOT EXISTS traffic_events_session ON traffic_events(session_id,at);
-                CREATE INDEX IF NOT EXISTS traffic_events_ip_time ON traffic_events(ip,at);
             """)
 
     @contextmanager
@@ -111,7 +101,6 @@ class ScoreStore:
         with self.connect() as db:
             db.execute("DELETE FROM pressure_samples WHERE at<?", (now - 3600,))
             db.execute("DELETE FROM scores WHERE at<?", (now - SCORE_RETENTION_SECONDS,))
-            db.execute("DELETE FROM traffic_events WHERE at<?", (now - IP_RETENTION_SECONDS,))
 
     def record(
         self,
@@ -146,7 +135,6 @@ class ScoreStore:
             )
             db.execute("DELETE FROM pressure_samples WHERE at<?", (at - 3600,))
             db.execute("DELETE FROM scores WHERE at<?", (at - SCORE_RETENTION_SECONDS,))
-            db.execute("DELETE FROM traffic_events WHERE at<?", (at - IP_RETENTION_SECONDS,))
         return len(records)
 
     def import_csv(self, csv_path: Path) -> int:
@@ -227,67 +215,6 @@ class ScoreStore:
                 for row in rows
             ],
         }
-
-    def record_traffic(self, kind: str, session_id: str, ip: str, now: int) -> None:
-        if kind not in {"view", "heartbeat"} or not SESSION_ID.fullmatch(session_id):
-            raise ValueError("invalid traffic event")
-        with self.connect() as db:
-            recent_from_ip = db.execute(
-                "SELECT COUNT(*) FROM traffic_events WHERE ip=? AND at>=?",
-                (ip[:64], now - 60),
-            ).fetchone()[0]
-            if recent_from_ip >= 120:
-                return
-            previous = db.execute(
-                "SELECT at,kind FROM traffic_events WHERE session_id=? ORDER BY at DESC LIMIT 1",
-                (session_id,),
-            ).fetchone()
-            if kind == "heartbeat" and previous and previous[1] == "heartbeat" and now - previous[0] < 30:
-                return
-            watched = min(60, now - previous[0]) if kind == "heartbeat" and previous and 0 <= now - previous[0] <= 120 else 0
-            db.execute(
-                "INSERT INTO traffic_events(at,session_id,ip,kind,watched_seconds) VALUES(?,?,?,?,?)",
-                (now, session_id, ip[:64], kind, watched),
-            )
-            db.execute("DELETE FROM traffic_events WHERE at<?", (now - IP_RETENTION_SECONDS,))
-
-    def traffic_summary(self, now: int) -> dict[str, int | float]:
-        with self.connect() as db:
-            views, unique_ips, watched = db.execute("""
-                SELECT COUNT(*) FILTER (WHERE kind='view'),
-                       COUNT(DISTINCT ip) FILTER (WHERE kind='view'),
-                       COALESCE(SUM(watched_seconds),0)
-                FROM traffic_events WHERE at >= ?
-            """, (now - 86400,)).fetchone()
-            active = db.execute(
-                "SELECT COUNT(DISTINCT session_id) FROM traffic_events "
-                "WHERE kind='heartbeat' AND at>=?",
-                (now - 120,),
-            ).fetchone()[0]
-        return {
-            "active_viewers": active,
-            "page_views_24h": views,
-            "unique_ips_24h": unique_ips,
-            "viewer_hours_24h": round(watched / 3600, 2),
-        }
-
-    def traffic_report(self, now: int) -> list[dict[str, object]]:
-        """Operator-only local report; no HTTP route exposes raw addresses."""
-        with self.connect() as db:
-            rows = db.execute("""
-                SELECT ip,
-                       COUNT(*) FILTER (WHERE kind='view') AS views,
-                       COALESCE(SUM(watched_seconds),0) AS watched_seconds,
-                       MAX(at) AS last_seen
-                FROM traffic_events WHERE at >= ?
-                GROUP BY ip ORDER BY views DESC, watched_seconds DESC LIMIT 100
-            """, (now - 86400,)).fetchall()
-        return [
-            {"ip": ip, "views": views, "viewer_minutes": round(seconds / 60, 1), "last_seen": iso_utc(last_seen)}
-            for ip, views, seconds, last_seen in rows
-        ]
-
-
 class PriceCache:
     def __init__(self) -> None:
         self.prices: dict[str, ModelPrice] = {}
@@ -308,38 +235,10 @@ class PriceCache:
 
 
 class ScoreService:
-    def __init__(self, store: ScoreStore, trusted_proxy_cidrs: str = "", public_origin: str = "") -> None:
+    def __init__(self, store: ScoreStore) -> None:
         self.store = store
         self.prices = PriceCache()
         self.last_error: str | None = None
-        self.trusted_proxies = [ipaddress.ip_network(item.strip()) for item in trusted_proxy_cidrs.split(",") if item.strip()]
-        self.public_origin = public_origin.rstrip("/")
-        if self.public_origin:
-            parsed = urlparse(self.public_origin)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path or parsed.query or parsed.fragment or parsed.username:
-                raise ValueError("PUBLIC_ORIGIN must be an http(s) origin without a path or credentials")
-
-    def trusts_proxy(self, address: str) -> bool:
-        try:
-            ip = ipaddress.ip_address(address)
-        except ValueError:
-            return False
-        return any(ip in network for network in self.trusted_proxies)
-
-    def client_ip(self, peer: str, forwarded_for: str | None, real_ip: str | None) -> str:
-        if not self.trusts_proxy(peer):
-            return peer
-        # Walk from the known proxy toward the client; never trust an arbitrary
-        # leftmost address supplied by a visitor. Traefik must sanitize headers.
-        forwarded = forwarded_for or real_ip or ""
-        try:
-            chain = [str(ipaddress.ip_address(item.strip())) for item in forwarded.split(",") if item.strip()]
-        except ValueError:
-            return peer
-        for address in reversed(chain):
-            if not self.trusts_proxy(address):
-                return address
-        return chain[0] if chain else peer
 
     def capture(self, now: int | None = None) -> int:
         now = int(time.time()) if now is None else now
@@ -378,9 +277,6 @@ class ScoreHandler(BaseHTTPRequestHandler):
         if parsed.path == "/healthz":
             self.send_json({"ok": True})
             return
-        if parsed.path == "/api/traffic":
-            self.send_json(self.server.service.store.traffic_summary(int(time.time())))  # type: ignore[attr-defined]
-            return
         if parsed.path != "/api/scores":
             self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
@@ -394,30 +290,10 @@ class ScoreHandler(BaseHTTPRequestHandler):
         self.send_json(payload)
 
     def do_POST(self) -> None:
-        kind = {"/api/view": "view", "/api/heartbeat": "heartbeat"}.get(urlparse(self.path).path)
-        if kind is None:
-            self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
-            return
-        try:
-            if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
-                raise ValueError("JSON content type required")
-            origin = self.headers.get("Origin")
-            service = self.server.service  # type: ignore[attr-defined]
-            scheme = self.headers.get("X-Forwarded-Proto", "http") if service.trusts_proxy(self.client_address[0]) else "http"
-            expected_origin = service.public_origin or f"{scheme}://{self.headers.get('Host')}"
-            if origin and origin != expected_origin:
-                raise ValueError("cross-origin traffic event rejected")
-            length = int(self.headers.get("Content-Length", "0"))
-            if length < 1 or length > 256:
-                raise ValueError("invalid request size")
-            payload = json.loads(self.rfile.read(length))
-            session_id = str(payload["session_id"])
-            ip = service.client_ip(self.client_address[0], self.headers.get("X-Forwarded-For"), self.headers.get("X-Real-IP"))
-            service.store.record_traffic(kind, session_id, ip, int(time.time()))
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError, sqlite3.Error) as error:
-            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
-            return
-        self.send_json({"ok": True})
+        # Old browser tabs may still send heartbeats after an upgrade.
+        # Reject without reading, attributing, logging, or storing the body.
+        self.close_connection = True
+        self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
     def send_bytes(self, body: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         self.send_response(status)
@@ -428,7 +304,8 @@ class ScoreHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         if content_type.startswith("text/html"):
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'")
+            # Allow Cloudflare's beacon host, including versioned script paths.
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'")
         self.end_headers()
         self.wfile.write(body)
 
@@ -437,7 +314,7 @@ class ScoreHandler(BaseHTTPRequestHandler):
         self.send_bytes(body, "application/json; charset=utf-8", status)
 
     def log_message(self, format: str, *args: object) -> None:
-        # Avoid a second, unbounded copy of visitor IPs in container logs.
+        # Do not collect visitor addresses or URLs in application access logs.
         pass
 
 
@@ -449,13 +326,10 @@ def main() -> None:
     serve.add_argument("--host", default=os.environ.get("BIND_HOST", "127.0.0.1"))
     serve.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8788")))
     serve.add_argument("--interval", type=int, default=int(os.environ.get("POLL_INTERVAL_SECONDS", "60")))
-    serve.add_argument("--trusted-proxy-cidrs", default=os.environ.get("TRUSTED_PROXY_CIDRS", ""))
-    serve.add_argument("--public-origin", default=os.environ.get("PUBLIC_ORIGIN", ""))
     import_csv = subparsers.add_parser("import-csv", help="backfill public score history from a CSV")
     import_csv.add_argument("csv_path", type=Path)
     import_load = subparsers.add_parser("import-load-csv", help="seed the 15-minute average from a public load CSV")
     import_load.add_argument("csv_path", type=Path)
-    subparsers.add_parser("traffic-report", help="show the last 24 hours of IP-level traffic locally")
     args = parser.parse_args()
     store = ScoreStore(args.db)
     if args.command == "import-csv":
@@ -464,10 +338,7 @@ def main() -> None:
     if args.command == "import-load-csv":
         print(f"Imported {store.import_load_csv(args.csv_path, int(time.time()))} recent pressure samples")
         return
-    if args.command == "traffic-report":
-        print(json.dumps(store.traffic_report(int(time.time())), indent=2))
-        return
-    service = ScoreService(store, args.trusted_proxy_cidrs, args.public_origin)
+    service = ScoreService(store)
     server = ThreadingHTTPServer((args.host, args.port), ScoreHandler)
     server.service = service  # type: ignore[attr-defined]
     stop = threading.Event()

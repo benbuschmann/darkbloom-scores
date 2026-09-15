@@ -1,4 +1,4 @@
-"""Offline checks for the public score-only site and traffic counters."""
+"""Offline checks for public scores, privacy migration, and HTTP boundaries."""
 
 import json
 import tempfile
@@ -53,15 +53,10 @@ class ScoreFeedTests(unittest.TestCase):
         self.assertEqual(rows[-1]["score"], 2)
         self.assertEqual(len(rows), 2)
 
-    def test_proxy_headers_are_ignored_unless_peer_is_trusted(self) -> None:
-        service = score_feed.ScoreService(self.store)
-        self.assertEqual(service.client_ip("203.0.113.9", "198.51.100.5", None), "203.0.113.9")
-        service = score_feed.ScoreService(self.store, "172.20.0.0/24", "https://scores.example")
-        self.assertEqual(service.client_ip("172.20.0.2", "198.51.100.99, 203.0.113.9", None), "203.0.113.9")
-        self.assertEqual(service.client_ip("172.20.0.2", "203.0.113.9, 172.20.0.3", None), "203.0.113.9")
-        self.assertEqual(service.client_ip("172.20.0.2", "not-an-address", None), "172.20.0.2")
-        with self.assertRaises(ValueError):
-            score_feed.ScoreService(self.store, public_origin="https://scores.example/path")
+    def test_fresh_database_contains_only_model_history(self) -> None:
+        with self.store.connect() as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertEqual(tables, {"scores", "pressure_samples"})
 
     def test_dependency_installer_rejects_modified_source(self) -> None:
         target = Path(self.directory.name) / "warm_model_manager.py"
@@ -96,29 +91,35 @@ class ScoreFeedTests(unittest.TestCase):
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT pressure FROM pressure_samples").fetchone()[0], 3.0)
 
-    def test_traffic_counts_active_sessions_and_drops_old_ips(self) -> None:
-        now = 1_700_000_000
-        session = "session_12345"
-        self.store.record_traffic("view", session, "203.0.113.7", now)
-        self.store.record_traffic("heartbeat", session, "203.0.113.7", now)
-        self.store.record_traffic("heartbeat", session, "203.0.113.7", now + 60)
-        self.store.record_traffic("heartbeat", session, "203.0.113.7", now + 61)
-        summary = self.store.traffic_summary(now + 61)
-        self.assertEqual(summary["active_viewers"], 1)
-        self.assertEqual(summary["page_views_24h"], 1)
-        self.assertEqual(summary["unique_ips_24h"], 1)
-        self.assertEqual(summary["viewer_hours_24h"], 0.02)
-        with self.assertRaises(ValueError):
-            self.store.record_traffic("view", "bad", "203.0.113.7", now)
-        later = now + 8 * 86400
-        self.store.record_traffic("view", "another_session", "198.51.100.2", later)
+    def test_upgrade_removes_legacy_visitors_but_preserves_scores(self) -> None:
+        now = 1_700_000_040
+        model = "gpt-oss-20b"
+        price = ModelPrice(0.02, 0.1)
+        self.store.record({model: CapacitySample(model, 2, 4, 2)}, {model: price}, price, now)
+        expected = self.store.read(7200, now)
         with self.store.connect() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM traffic_events").fetchone()[0], 1)
-        self.store.prune(later + 8 * 86400)
-        with self.store.connect() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM traffic_events").fetchone()[0], 0)
+            db.executescript("""
+                CREATE TABLE traffic_events (
+                    id INTEGER PRIMARY KEY, at INTEGER, session_id TEXT, ip TEXT,
+                    kind TEXT, watched_seconds INTEGER
+                );
+                CREATE INDEX traffic_events_time ON traffic_events(at);
+                CREATE INDEX traffic_events_session ON traffic_events(session_id,at);
+                CREATE INDEX traffic_events_ip_time ON traffic_events(ip,at);
+                INSERT INTO traffic_events VALUES (1,1700000040,'legacy-session','203.0.113.7','view',0);
+                CREATE TABLE unrelated_data (value TEXT);
+                INSERT INTO unrelated_data VALUES ('keep me');
+            """)
+        for _ in range(2):
+            self.store = score_feed.ScoreStore(self.store.path)
+            self.assertEqual(self.store.read(7200, now), expected)
+            with self.store.connect() as db:
+                self.assertEqual(db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'traffic_events%'").fetchall(), [])
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM pressure_samples").fetchone()[0], 1)
+                self.assertEqual(db.execute("SELECT value FROM unrelated_data").fetchone()[0], "keep me")
+            self.store.prune(now)
 
-    def test_http_site_is_public_score_only_and_traffic_is_aggregate(self) -> None:
+    def test_http_is_score_only_and_rejects_legacy_tracking(self) -> None:
         service = score_feed.ScoreService(self.store)
         server = score_feed.ThreadingHTTPServer(("127.0.0.1", 0), score_feed.ScoreHandler)
         server.service = service
@@ -129,46 +130,35 @@ class ScoreFeedTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         base = f"http://127.0.0.1:{server.server_port}"
         with urlopen(base + "/", timeout=3) as response:
-            self.assertIn(b"Darkbloom model scores", response.read())
+            html = response.read().decode()
+            self.assertIn("Darkbloom model scores", html)
+            for marker in ("Website traffic", "api/traffic", "api/view", "api/heartbeat", "sessionStorage", "localStorage", "sendTraffic"):
+                self.assertNotIn(marker, html)
+            csp = response.headers["Content-Security-Policy"]
+            self.assertIn("https://static.cloudflareinsights.com;", csp)
+            self.assertIn("connect-src 'self'", csp)
+            self.assertNotIn("no-transform", response.headers["Cache-Control"])
+            self.assertIsNone(response.headers.get("Set-Cookie"))
         with urlopen(base + "/api/scores?window=7200", timeout=3) as response:
             self.assertEqual(json.load(response)["rows"], [])
-        for path in ("/healthz", "/api/traffic"):
-            with urlopen(base + path, timeout=3) as response:
-                self.assertEqual(response.status, 200)
-        for path in ("/.env", "/data/scores.sqlite3", "/server.py", "/api/earnings", "/api/providers"):
+        with urlopen(base + "/healthz", timeout=3) as response:
+            self.assertTrue(json.load(response)["ok"])
+        for path in ("/.env", "/data/scores.sqlite3", "/server.py", "/api/earnings", "/api/providers", "/api/traffic", "/api/view", "/api/heartbeat"):
             with self.assertRaises(HTTPError) as error:
                 urlopen(base + path, timeout=3)
             self.assertEqual(error.exception.code, 404)
             error.exception.close()
-        body = json.dumps({"session_id": "browser_session_123"}).encode()
-        request = Request(
-            base + "/api/view", data=body, method="POST",
-            headers={"Content-Type": "application/json", "X-Real-IP": "203.0.113.9"},
-        )
-        with urlopen(request, timeout=3) as response:
-            self.assertTrue(json.load(response)["ok"])
-        with self.store.connect() as db:
-            self.assertEqual(db.execute("SELECT ip FROM traffic_events").fetchone()[0], "127.0.0.1")
-        service.public_origin = "https://scores.example"
-        secure_origin = Request(
-            base + "/api/heartbeat", data=body, method="POST",
-            headers={"Content-Type": "application/json", "Origin": "https://scores.example"},
-        )
-        with urlopen(secure_origin, timeout=3) as response:
-            self.assertTrue(json.load(response)["ok"])
-        cross_origin = Request(
-            base + "/api/view", data=body, method="POST",
-            headers={"Content-Type": "application/json", "Origin": "https://other.example"},
-        )
-        with self.assertRaises(HTTPError) as error:
-            urlopen(cross_origin, timeout=3)
-        self.assertEqual(error.exception.code, 400)
-        error.exception.close()
-        with urlopen(base + "/api/traffic", timeout=3) as response:
-            payload = json.load(response)
-            self.assertEqual(payload["page_views_24h"], 1)
-            self.assertEqual(payload["unique_ips_24h"], 1)
-            self.assertNotIn("203.0.113.9", json.dumps(payload))
+        for path in ("/api/traffic", "/api/view", "/api/heartbeat"):
+            request = Request(
+                base + path, data=b'{"session_id":"legacy_browser_session"}', method="POST",
+                headers={"Content-Type": "application/json", "X-Real-IP": "203.0.113.9",
+                         "X-Forwarded-For": "198.51.100.2", "Origin": "https://other.example"},
+            )
+            with self.assertRaises(HTTPError) as error:
+                urlopen(request, timeout=3)
+            self.assertEqual(error.exception.code, 404)
+            error.exception.close()
+        self.test_fresh_database_contains_only_model_history()
 
     def test_collector_uses_only_public_capacity_and_pricing(self) -> None:
         service = score_feed.ScoreService(self.store)
