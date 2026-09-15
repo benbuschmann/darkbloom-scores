@@ -1,6 +1,7 @@
 """Offline checks for public scores, privacy migration, and HTTP boundaries."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import threading
 import unittest
@@ -19,6 +20,75 @@ class ScoreFeedTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.store = score_feed.ScoreStore(Path(self.directory.name) / "scores.sqlite3")
+
+    def test_score_cache_reuses_serialized_results_per_window_and_expires(self) -> None:
+        now = 1_700_000_040
+        service = score_feed.ScoreService(self.store)
+        model = "cache-model"
+        price = ModelPrice(1, 1)
+        self.store.record({model: CapacitySample(model, 1, 2, 2)}, {model: price}, price, now)
+        with patch.object(score_feed.time, "time", return_value=now), \
+             patch.object(score_feed.time, "monotonic", return_value=100) as clock, \
+             patch.object(self.store, "read", wraps=self.store.read) as read:
+            first, ttl = service.read_scores(7200)
+            self.assertEqual(ttl, 30)
+            clock.return_value = 111
+            second, ttl = service.read_scores(7200)
+            self.assertIs(first, second)
+            self.assertEqual(ttl, 19)
+            self.assertEqual(read.call_count, 1)
+            monthly, _ = service.read_scores(2592000)
+            self.assertEqual(json.loads(monthly)["bucket_seconds"], 3600)
+            self.assertEqual(read.call_count, 2)
+            clock.return_value = 130
+            service.read_scores(7200)
+            self.assertEqual(read.call_count, 3)
+            with self.assertRaises(ValueError):
+                service.read_scores(9999)
+            self.assertEqual(read.call_count, 3)
+
+    def test_concurrent_score_requests_share_one_database_read(self) -> None:
+        service = score_feed.ScoreService(self.store)
+        with patch.object(self.store, "read", wraps=self.store.read) as read:
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                responses = list(pool.map(service.read_scores, [7200] * 20))
+            self.assertEqual(read.call_count, 1)
+            self.assertTrue(all(body is responses[0][0] for body, _ in responses))
+            self.assertTrue(all(ttl == 0 for _, ttl in responses))  # Empty history stays out of the CDN.
+
+    def test_new_sample_invalidates_cached_scores_immediately(self) -> None:
+        now = 1_700_000_040
+        service = score_feed.ScoreService(self.store)
+        model = "cache-model"
+        price = ModelPrice(1, 1)
+        with patch.object(score_feed, "fetch_capacity", return_value={model: CapacitySample(model, 1, 2, 2)}), \
+             patch.object(score_feed, "fetch_model_prices", return_value=({model: price}, price)), \
+             patch.object(score_feed.time, "time", return_value=now):
+            service.capture(now)
+            body, _ = service.read_scores(7200)
+            self.assertEqual(len(json.loads(body)["rows"]), 1)
+            service.capture(now + 60)
+            body, _ = service.read_scores(7200)
+            self.assertEqual(len(json.loads(body)["rows"]), 2)
+
+    def test_collection_failure_invalidates_cache_and_disables_cdn_storage(self) -> None:
+        now = 1_700_000_040
+        service = score_feed.ScoreService(self.store)
+        model = "cache-model"
+        price = ModelPrice(1, 1)
+        self.store.record({model: CapacitySample(model, 1, 2, 2)}, {model: price}, price, now)
+        with patch.object(score_feed.time, "time", return_value=now):
+            _, ttl = service.read_scores(7200)
+            self.assertGreater(ttl, 0)
+            stop = threading.Event()
+            def fail_capture():
+                stop.set()
+                raise RuntimeError("public feed unavailable")
+            with patch.object(service, "capture", side_effect=fail_capture), patch("builtins.print"):
+                service.loop(60, stop)
+            body, ttl = service.read_scores(7200)
+            self.assertEqual(ttl, 0)
+            self.assertEqual(json.loads(body)["last_error"], "public feed unavailable")
 
     def test_records_manager_formula_and_time_windows(self) -> None:
         now = 1_700_000_040
@@ -143,6 +213,20 @@ class ScoreFeedTests(unittest.TestCase):
             self.assertEqual(json.load(response)["rows"], [])
         with urlopen(base + "/healthz", timeout=3) as response:
             self.assertTrue(json.load(response)["ok"])
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+        model = "cache-model"
+        price = ModelPrice(1, 1)
+        with patch.object(score_feed, "fetch_capacity", return_value={model: CapacitySample(model, 1, 2, 2)}), \
+             patch.object(score_feed, "fetch_model_prices", return_value=({model: price}, price)):
+            service.capture()
+        with urlopen(base + "/api/scores?window=7200", timeout=3) as response:
+            self.assertIn("public, max-age=0, s-maxage=", response.headers["Cache-Control"])
+            self.assertEqual(len(json.load(response)["rows"]), 1)
+        with self.assertRaises(HTTPError) as error:
+            urlopen(base + "/api/scores?window=9999", timeout=3)
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(error.exception.headers["Cache-Control"], "no-store")
+        error.exception.close()
         for path in ("/.env", "/data/scores.sqlite3", "/server.py", "/api/earnings", "/api/providers", "/api/traffic", "/api/view", "/api/heartbeat"):
             with self.assertRaises(HTTPError) as error:
                 urlopen(base + path, timeout=3)

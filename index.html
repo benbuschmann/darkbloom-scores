@@ -214,7 +214,7 @@
     }
     async function refreshScores() {
       try {
-        const response = await fetch(`api/scores?window=${windowSeconds}`,{cache:'no-store'});
+        const response = await fetch(`api/scores?window=${windowSeconds}`);
         if (!response.ok) throw new Error(`Feed returned ${response.status}`);
         data = await response.json();
         render();

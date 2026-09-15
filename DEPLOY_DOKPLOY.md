@@ -42,6 +42,36 @@ are in the Dockerfile; no visitor-attribution environment variables are needed.
 Runtime requires outbound HTTPS to Darkbloom's public feeds, and builds require
 GitHub access for the checksum-pinned dependency.
 
+## Public score caching
+
+The app shares serialized responses per supported time window for up to 30
+seconds and invalidates them immediately after recording a new sample or
+reporting a collection failure. Cache size is bounded by the eight supported
+windows. Healthy score responses use `Cache-Control: public, max-age=0,
+s-maxage=N`, with N reduced by their age in the application cache. Browsers
+must fetch fresh data; shared caches can reuse it for the remaining lifetime.
+Empty history, collection failures, HTTP errors, HTML, and health checks stay
+`no-store`. No additional service or dependency is required.
+
+For Cloudflare Free, create a Cache Rule matching only GET requests to
+`darkbloom.benbuschmann.com/api/scores`:
+
+```text
+(http.host eq "darkbloom.benbuschmann.com" and http.request.method eq "GET" and http.request.uri.path eq "/api/scores")
+```
+
+- Cache eligibility: **Eligible for cache**.
+- Edge TTL: **Use cache-control header if present, bypass cache if not**.
+- Browser TTL: **Respect origin TTL** (or leave the override unset).
+- Keep the default cache key, including the query string. Do not ignore `window`.
+- Do not set a fixed Edge TTL override or status-code TTL. The app supplies
+  the short lifetime; the Free-plan fixed override minimum is unsuitable here.
+
+Verify repeated requests return `CF-Cache-Status: HIT`, that `Age` stays within
+the remaining lifetime, and that new score timestamps appear after expiration.
+Different Cloudflare locations maintain separate caches. A restart empties the
+app cache and leaves the database volume intact.
+
 ## Analytics: Cloudflare only
 
 In Cloudflare Web Analytics, add/select this hostname and enable automatic

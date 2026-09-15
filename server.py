@@ -45,6 +45,7 @@ WINDOW_BUCKETS = {
 }
 SAMPLE_WINDOW_SECONDS = 15 * 60
 SCORE_RETENTION_SECONDS = 31 * 86400
+SCORE_CACHE_SECONDS = 30
 WEB_PATH = Path(__file__).with_name("index.html")
 
 
@@ -239,13 +240,37 @@ class ScoreService:
         self.store = store
         self.prices = PriceCache()
         self.last_error: str | None = None
+        # Eight supported windows bound memory use; the lock also prevents a
+        # burst of visitors from computing the same uncached window repeatedly.
+        self._scores_lock = threading.Lock()
+        self._scores_cache: dict[int, tuple[float, bytes, bool]] = {}
+
+    def read_scores(self, window: int) -> tuple[bytes, int]:
+        if window not in WINDOW_BUCKETS:
+            raise ValueError("unsupported time window")
+        with self._scores_lock:
+            cached = self._scores_cache.get(window)
+            if cached is None or time.monotonic() >= cached[0]:
+                payload = self.store.read(window, int(time.time()))
+                payload["last_error"] = self.last_error
+                body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+                healthy = self.last_error is None and payload["last_sample_at"] is not None
+                cached = (time.monotonic() + SCORE_CACHE_SECONDS, body, healthy)
+                self._scores_cache[window] = cached
+            expires, body, healthy = cached
+            # Deduct time spent in the app cache so CDN caching does not add
+            # another complete freshness period on top of an old response.
+            ttl = max(0, int(expires - time.monotonic())) if healthy else 0
+            return body, ttl
 
     def capture(self, now: int | None = None) -> int:
         now = int(time.time()) if now is None else now
         capacity = fetch_capacity(DEFAULT_BASE_URL)
         prices, fallback = self.prices.read(now)
-        count = self.store.record(capacity, prices, fallback, now)
-        self.last_error = self.prices.last_error
+        with self._scores_lock:
+            count = self.store.record(capacity, prices, fallback, now)
+            self.last_error = self.prices.last_error
+            self._scores_cache.clear()
         return count
 
     def loop(self, interval: int, stop: threading.Event) -> None:
@@ -253,7 +278,9 @@ class ScoreService:
             try:
                 self.capture()
             except (RuntimeError, OSError, sqlite3.Error, ValueError) as error:
-                self.last_error = str(error)
+                with self._scores_lock:
+                    self.last_error = str(error)
+                    self._scores_cache.clear()
                 print(f"Score capture failed: {error}", flush=True)
             try:
                 self.store.prune(int(time.time()))
@@ -282,12 +309,12 @@ class ScoreHandler(BaseHTTPRequestHandler):
             return
         try:
             window = int(parse_qs(parsed.query).get("window", ["7200"])[0])
-            payload = self.server.service.store.read(window, int(time.time()))  # type: ignore[attr-defined]
+            body, ttl = self.server.service.read_scores(window)  # type: ignore[attr-defined]
         except (ValueError, sqlite3.Error) as error:
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
-        payload["last_error"] = self.server.service.last_error  # type: ignore[attr-defined]
-        self.send_json(payload)
+        cache_control = f"public, max-age=0, s-maxage={ttl}" if ttl else "no-store"
+        self.send_bytes(body, "application/json; charset=utf-8", cache_control=cache_control)
 
     def do_POST(self) -> None:
         # Old browser tabs may still send heartbeats after an upgrade.
@@ -295,11 +322,12 @@ class ScoreHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
-    def send_bytes(self, body: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def send_bytes(self, body: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK,
+                   *, cache_control: str = "no-store") -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
