@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Darkbloom model scores</title>
+  <style>
+    :root { color-scheme:dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#f0f6fc; --muted:#8b949e; --blue:#58a6ff; --green:#3fb950; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+    main { width:min(1120px,calc(100% - 32px)); margin:36px auto 72px; }
+    header { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; margin-bottom:24px; }
+    h1 { margin:0; font:650 28px/1.15 system-ui,sans-serif; letter-spacing:-.025em; }
+    h2 { margin:0; font:650 17px/1.25 system-ui,sans-serif; }
+    p { margin:8px 0 0; }
+    a { color:var(--blue); }
+    .intro,.note,.muted { color:var(--muted); }
+    .intro { max-width:700px; }
+    .top-link { flex:none; margin-top:6px; font-size:12px; text-decoration:none; }
+    .status { display:flex; align-items:center; gap:8px; margin-bottom:16px; color:var(--muted); font-size:11px; }
+    .status-dot { width:8px; height:8px; flex:none; border-radius:50%; background:var(--muted); }
+    .status.live .status-dot { background:var(--green); box-shadow:0 0 0 4px #3fb95018; }
+    .status.stale .status-dot { background:#e3b341; }
+    .card { padding:18px; border:1px solid var(--line); border-radius:12px; background:var(--panel); }
+    .card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:15px; flex-wrap:wrap; }
+    .subtitle { margin:4px 0 0; color:var(--muted); font-size:11px; }
+    .ranges { display:flex; flex-wrap:wrap; gap:5px; }
+    button { border:1px solid var(--line); border-radius:6px; padding:5px 8px; background:transparent; color:var(--muted); font:inherit; cursor:pointer; }
+    button:hover,button:focus-visible { border-color:var(--blue); color:var(--text); }
+    .range[aria-pressed="true"] { border-color:var(--blue); background:var(--blue); color:var(--bg); font-weight:700; }
+    .chart { width:100%; min-height:300px; margin-top:12px; }
+    .chart svg { display:block; width:100%; height:auto; overflow:visible; }
+    .chart .grid,.chart .frame { stroke:var(--line); stroke-width:1; }
+    .chart .frame { fill:none; }
+    .chart .axis { fill:var(--muted); font-size:10px; }
+    .chart .axis-title { fill:var(--text); font-size:11px; }
+    .chart .score-line { fill:none; stroke-width:2.2; }
+    .chart .endpoint { cursor:pointer; }
+    .chart .endpoint:focus { outline:none; }
+    .chart .endpoint:focus text { text-decoration:underline; }
+    .chart .label-link { stroke-width:1; opacity:.7; }
+    .chart .endpoint-label { font-size:9px; font-weight:700; paint-order:stroke; stroke:var(--panel); stroke-width:3px; stroke-linejoin:round; }
+    .chart .point { stroke:var(--panel); stroke-width:2; }
+    .chart-actions { display:flex; justify-content:flex-end; min-height:26px; }
+    .chart-actions button { font-size:10px; }
+    .explain { color:var(--muted); font-size:11px; }
+    .traffic { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:16px; }
+    .traffic-item { border:1px solid var(--line); border-radius:9px; padding:12px 14px; background:var(--panel); }
+    .traffic-label { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.04em; }
+    .traffic-value { margin-top:5px; font-size:22px; font-weight:650; font-variant-numeric:tabular-nums; }
+    footer { margin-top:16px; color:var(--muted); font-size:10px; }
+    @media(max-width:700px) { .traffic { grid-template-columns:repeat(2,minmax(0,1fr)); } header { display:block; } .top-link { display:inline-block; margin-top:12px; } }
+    @media(max-width:500px) { h1 { font-size:23px; } .card { padding:12px; } .chart .endpoint-label { font-size:8px; } .traffic-item { padding:10px; } .traffic-value { font-size:19px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Darkbloom model scores</h1>
+        <p class="intro">Live public network pressure × blended token price × the manager’s default model weight. A comparison signal, not anyone’s actual earnings.</p>
+      </div>
+      <a class="top-link" href="https://github.com/benbuschmann/darkbloom-manager">View the manager source ↗</a>
+    </header>
+    <div id="status" class="status"><span class="status-dot"></span><span id="status-text">Loading score history…</span></div>
+    <section class="card" aria-labelledby="chart-title">
+      <div class="card-head">
+        <div><h2 id="chart-title">All model scores</h2><p class="subtitle">One shared vertical scale · one score point per model per minute</p></div>
+        <nav class="ranges" aria-label="Chart time window">
+          <button class="range" data-window="1800" aria-pressed="false">30m</button>
+          <button class="range" data-window="3600" aria-pressed="false">1h</button>
+          <button class="range" data-window="7200" aria-pressed="true">2h</button>
+          <button class="range" data-window="14400" aria-pressed="false">4h</button>
+          <button class="range" data-window="43200" aria-pressed="false">12h</button>
+          <button class="range" data-window="86400" aria-pressed="false">24h</button>
+          <button class="range" data-window="604800" aria-pressed="false">7d</button>
+          <button class="range" data-window="2592000" aria-pressed="false">30d</button>
+        </nav>
+      </div>
+      <div id="chart" class="chart" role="img" aria-label="All model scores over time"></div>
+      <div id="chart-actions" class="chart-actions"></div>
+      <p class="explain">Labels sit beside the newest point when its score is at least 0.0001. Click a label to hide that line. Collection gaps stay gaps.</p>
+    </section>
+    <section class="traffic" aria-label="Website traffic">
+      <div class="traffic-item"><div class="traffic-label">Viewing now</div><div id="viewing-now" class="traffic-value">—</div></div>
+      <div class="traffic-item"><div class="traffic-label">Page views · 24h</div><div id="views-24h" class="traffic-value">—</div></div>
+      <div class="traffic-item"><div class="traffic-label">Viewer hours · 24h</div><div id="hours-24h" class="traffic-value">—</div></div>
+      <div class="traffic-item"><div class="traffic-label">Unique IPs · 24h</div><div id="ips-24h" class="traffic-value">—</div></div>
+    </section>
+    <footer>Viewer counts are approximate; shared networks and multiple tabs affect them. This site's private application database keeps IP addresses for up to seven days. The page contains no provider earnings or machine identities.</footer>
+  </main>
+  <script>
+    const chart = document.querySelector('#chart');
+    const actions = document.querySelector('#chart-actions');
+    const status = document.querySelector('#status');
+    const statusText = document.querySelector('#status-text');
+    const hidden = new Set();
+    const scoreFormat = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 4 });
+    const countFormat = new Intl.NumberFormat();
+    const colors = ['#58a6ff','#e3b341','#3fb950','#d2a8ff','#ff7b72','#79c0ff','#f2cc60','#56d4dd','#ffa657','#bc8cff','#7ee787','#ff9bce'];
+    let windowSeconds = 7200;
+    let data = null;
+
+    function element(name, attributes = {}, value = '') {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+      for (const [key, attribute] of Object.entries(attributes)) node.setAttribute(key, attribute);
+      if (value) node.textContent = value;
+      return node;
+    }
+    function scale(value, fromMin, fromMax, toMin, toMax) {
+      return toMin + (value - fromMin) / (fromMax - fromMin) * (toMax - toMin);
+    }
+    function shortName(id) {
+      const preferred = {
+        'gemma-4-26b-qat-4bit':'g4-26b',
+        'gemma-4-26b-8bit':'g4-26b-8b',
+        'qwen3.6-35b-a3b-vl-mtp-mxfp8':'Q3.6-35B',
+        'eigenlabs/qwen3.8-27b-4bit-mtp':'Q3.8-27B',
+        'qwen3-vl-30b-a3b-instruct':'Q3-30B',
+        'qwen3.5-35b-a3b':'Q3.5-35B',
+      };
+      const lower = id.toLowerCase();
+      if (preferred[lower]) return preferred[lower];
+      if (lower.includes('gpt-oss')) return 'OSS-' + (lower.match(/(\d+)b/)?.[1] || '') + 'B';
+      if (lower.includes('nemotron')) return 'N3.5-Light';
+      const family = lower.match(/(qwen|gemma)[\s-]*(\d+(?:\.\d+)?)/);
+      const size = lower.match(/(?:^|[-_])(\d+)b(?:$|[-_])/);
+      if (family) return `${family[1] === 'qwen' ? 'Q' : 'G'}${family[2]}${size ? `-${size[1]}B` : ''}`.slice(0,10);
+      return id.length > 10 ? id.slice(0,9) + '…' : id;
+    }
+    function formatScore(value) {
+      return value > 0 && value < 0.0005 ? '<0.001' : value.toFixed(3);
+    }
+    function spreadLabels(entries, minY, maxY) {
+      const sorted = entries.map(entry => ({ ...entry, labelY: entry.y })).sort((a,b) => a.y - b.y);
+      if (!sorted.length) return sorted;
+      const gap = Math.min(18, (maxY - minY) / Math.max(1, sorted.length - 1));
+      for (let i=1; i<sorted.length; i++) sorted[i].labelY = Math.max(sorted[i].labelY, sorted[i-1].labelY + gap);
+      const overflow = sorted.at(-1).labelY - maxY;
+      if (overflow > 0) sorted.forEach(entry => { entry.labelY -= overflow; });
+      for (let i=sorted.length-2; i>=0; i--) sorted[i].labelY = Math.min(sorted[i].labelY, sorted[i+1].labelY - gap);
+      const underflow = minY - sorted[0].labelY;
+      if (underflow > 0) sorted.forEach(entry => { entry.labelY += underflow; });
+      return sorted;
+    }
+    function timeLabel(timestamp) {
+      const date = new Date(timestamp);
+      if (windowSeconds <= 43200) return date.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+      if (windowSeconds <= 604800) return date.toLocaleString([], {weekday:'short',hour:'numeric'});
+      return date.toLocaleDateString([], {month:'short',day:'numeric'});
+    }
+    function render() {
+      if (!data) return;
+      const width = Math.max(280, Math.floor(chart.clientWidth));
+      const height = 330;
+      const left = width < 520 ? 58 : 70;
+      const right = width - 108;
+      const top = 18;
+      const bottom = height - 42;
+      const end = Date.parse(data.generated_at);
+      const start = end - windowSeconds * 1000;
+      const x = time => scale(time,start,end,left,right);
+      const grouped = new Map();
+      for (const row of data.rows) {
+        if (!grouped.has(row.model_id)) grouped.set(row.model_id,[]);
+        grouped.get(row.model_id).push({time:Date.parse(row.observed_at),score:row.score});
+      }
+      const modelIds = [...grouped.keys()].sort();
+      const visible = modelIds.filter(id => !hidden.has(id));
+      const maxScore = Math.max(0.01,...visible.flatMap(id => grouped.get(id).map(point => Number.isFinite(point.score) ? point.score : 0))) * 1.08;
+      const y = value => scale(value,0,maxScore,bottom,top);
+      const svg = element('svg',{viewBox:`0 0 ${width} ${height}`,'aria-label':`All model scores for the last ${windowSeconds/3600} hours`});
+      svg.append(element('title',{},'All model scores'));
+      for (let i=0; i<=4; i++) {
+        const value = maxScore*i/4;
+        const tick = y(value);
+        svg.append(element('line',{x1:left,x2:right,y1:tick,y2:tick,class:'grid'}));
+        svg.append(element('text',{x:left-7,y:tick+4,'text-anchor':'end',class:'axis'},scoreFormat.format(value)));
+      }
+      const tickCount = width<440 ? 3 : 5;
+      for (let i=0; i<tickCount; i++) {
+        const timestamp = start+(end-start)*i/(tickCount-1);
+        svg.append(element('text',{x:x(timestamp),y:bottom+19,'text-anchor':i===0?'start':i===tickCount-1?'end':'middle',class:'axis'},timeLabel(timestamp)));
+      }
+      svg.append(element('rect',{x:left,y:top,width:right-left,height:bottom-top,class:'frame'}));
+      const labels = [];
+      for (const id of visible) {
+        const points = grouped.get(id);
+        const color = colors[modelIds.indexOf(id)%colors.length];
+        let path = '';
+        let previous = null;
+        for (const point of points) {
+          if (!Number.isFinite(point.score)) { previous=null; continue; }
+          path += `${!previous || point.time-previous.time>Math.max(150000,data.bucket_seconds*2500)?'M':'L'}${x(point.time).toFixed(1)},${y(point.score).toFixed(1)} `;
+          previous=point;
+        }
+        svg.append(element('path',{d:path,class:'score-line',stroke:color}));
+        const last = points.at(-1);
+        if (Number.isFinite(last?.score)) {
+          svg.append(element('circle',{cx:x(last.time),cy:y(last.score),r:3.5,fill:color,class:'point'}));
+          if (last.score>=0.0001) labels.push({id,color,score:last.score,pointX:x(last.time),y:y(last.score)});
+        }
+      }
+      for (const label of spreadLabels(labels,top+9,bottom-9)) {
+        const group = element('g',{class:'endpoint',role:'button',tabindex:'0','aria-label':`${label.id}: score ${formatScore(label.score)}. Hide line`});
+        const labelX = Math.min(right+8,label.pointX+9);
+        group.append(element('line',{x1:label.pointX+4,y1:label.y,x2:labelX-3,y2:label.labelY,stroke:label.color,class:'label-link'}));
+        group.append(element('text',{x:labelX,y:label.labelY+4,style:`fill:${label.color}`,class:'endpoint-label'},`${shortName(label.id)} ${formatScore(label.score)}`));
+        group.addEventListener('click',() => { hidden.add(label.id); render(); });
+        group.addEventListener('keydown',event => { if (event.key==='Enter'||event.key===' ') { event.preventDefault(); hidden.add(label.id); render(); } });
+        svg.append(group);
+      }
+      if (!modelIds.length) svg.append(element('text',{x:(left+right)/2,y:(top+bottom)/2,'text-anchor':'middle',class:'axis'},'No saved scores in this window yet'));
+      svg.append(element('text',{x:13,y:(top+bottom)/2,transform:`rotate(-90 13 ${(top+bottom)/2})`,'text-anchor':'middle',class:'axis-title'},'Score'));
+      svg.append(element('text',{x:(left+right)/2,y:height-3,'text-anchor':'middle',class:'axis-title'},'Time'));
+      chart.replaceChildren(svg);
+      actions.replaceChildren();
+      const hiddenCount = modelIds.filter(id => hidden.has(id)).length;
+      if (hiddenCount) {
+        const button = document.createElement('button');
+        button.textContent = `Show ${hiddenCount} hidden line${hiddenCount===1?'':'s'}`;
+        button.addEventListener('click',() => { hidden.clear(); render(); });
+        actions.append(button);
+      }
+    }
+    async function refreshScores() {
+      try {
+        const response = await fetch(`api/scores?window=${windowSeconds}`,{cache:'no-store'});
+        if (!response.ok) throw new Error(`Feed returned ${response.status}`);
+        data = await response.json();
+        render();
+        const age = data.last_sample_at ? Date.now()-Date.parse(data.last_sample_at) : Infinity;
+        status.className = `status ${age < 180000 ? 'live' : 'stale'}`;
+        statusText.textContent = data.last_sample_at
+          ? `${age < 180000 ? 'Live' : 'Delayed'} · last score ${new Date(data.last_sample_at).toLocaleString()}${data.last_error ? ' · collector warning' : ''}`
+          : 'Waiting for the first public score snapshot';
+      } catch(error) {
+        status.className = 'status stale';
+        statusText.textContent = `Could not load score feed: ${error.message}`;
+      }
+    }
+    async function refreshTraffic() {
+      try {
+        const response = await fetch('api/traffic',{cache:'no-store'});
+        if (!response.ok) return;
+        const traffic = await response.json();
+        document.querySelector('#viewing-now').textContent = countFormat.format(traffic.active_viewers);
+        document.querySelector('#views-24h').textContent = countFormat.format(traffic.page_views_24h);
+        document.querySelector('#hours-24h').textContent = Number(traffic.viewer_hours_24h).toFixed(1);
+        document.querySelector('#ips-24h').textContent = countFormat.format(traffic.unique_ips_24h);
+      } catch { /* The public score chart remains usable if traffic stats fail. */ }
+    }
+    let sessionId = null;
+    try {
+      sessionId = sessionStorage.getItem('darkbloom-score-session') || crypto.randomUUID();
+      sessionStorage.setItem('darkbloom-score-session',sessionId);
+    } catch { /* Blocked storage or an insecure preview must not break the graph. */ }
+    async function sendTraffic(path) {
+      if (!sessionId) return;
+      try { await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:sessionId}),keepalive:true}); }
+      catch { /* Analytics must never block the chart. */ }
+    }
+    document.querySelectorAll('.range').forEach(button => button.addEventListener('click',() => {
+      windowSeconds = Number(button.dataset.window);
+      document.querySelectorAll('.range').forEach(item => item.setAttribute('aria-pressed',String(item===button)));
+      refreshScores();
+    }));
+    document.addEventListener('visibilitychange',() => { if (!document.hidden) { sendTraffic('api/heartbeat'); refreshScores(); refreshTraffic(); } });
+    new ResizeObserver(render).observe(chart);
+    sendTraffic('api/view').then(() => sendTraffic('api/heartbeat')).then(refreshTraffic);
+    refreshScores();
+    setInterval(() => { if (!document.hidden) { refreshScores(); sendTraffic('api/heartbeat').then(refreshTraffic); } },60000);
+  </script>
+</body>
+</html>

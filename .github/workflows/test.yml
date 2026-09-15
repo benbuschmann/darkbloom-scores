@@ -1,0 +1,36 @@
+name: Test deployment package
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python fetch_manager.py
+      - run: python -m py_compile server.py fetch_manager.py test_server.py
+      - run: python -m unittest -v
+      - name: Check frontend syntax
+        run: node -e "new Function(require('fs').readFileSync('index.html','utf8').match(/<script>([\s\S]*?)<\/script>/)[1])"
+      - name: Build image
+        run: docker build -t darkbloom-scores:test .
+      - name: Smoke-test container and persistence
+        run: |
+          docker volume create scores-test
+          docker run -d --name scores-test -p 127.0.0.1:8788:8788 -v scores-test:/data darkbloom-scores:test
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8788/healthz
+          curl --fail http://127.0.0.1:8788/api/scores?window=7200
+          docker exec scores-test python -c "import sqlite3; c=sqlite3.connect('/data/scores.sqlite3'); c.execute('CREATE TABLE persistence_probe (value INTEGER)'); c.execute('INSERT INTO persistence_probe VALUES (42)'); c.commit()"
+          docker stop scores-test
+          docker rm scores-test
+          docker run --rm -v scores-test:/data --entrypoint python darkbloom-scores:test -c "import sqlite3; c=sqlite3.connect('/data/scores.sqlite3'); assert c.execute('SELECT value FROM persistence_probe').fetchone()[0] == 42"
+      - name: Clean test containers
+        if: always()
+        run: |
+          docker rm -f scores-test 2>/dev/null || true
+          docker volume rm scores-test 2>/dev/null || true

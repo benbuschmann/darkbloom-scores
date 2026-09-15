@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+data/
+backups/
+*.sqlite*
+*.db
+*.db-*
+*.csv
+*.log
+.DS_Store
+# Exact upstream source is verified and installed at build/setup time.
+warm_model_manager.py
