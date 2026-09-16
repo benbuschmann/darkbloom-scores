@@ -46,8 +46,8 @@ GitHub access for the checksum-pinned dependency.
 
 The app shares serialized responses per supported time window for up to 30
 seconds and invalidates them immediately after recording a new sample or
-reporting a collection failure. Cache size is bounded by the eight supported
-windows. Healthy score responses use `Cache-Control: public, max-age=0,
+reporting a collection failure. Cache entries are keyed by `(window, average)`
+and bounded to the 16 most recently used combinations. Healthy score responses use `Cache-Control: public, max-age=0,
 s-maxage=N`, with N reduced by their age in the application cache. Browsers
 must fetch fresh data; shared caches can reuse it for the remaining lifetime.
 Empty history, collection failures, HTTP errors, HTML, and health checks stay
@@ -63,7 +63,8 @@ For Cloudflare Free, create a Cache Rule matching only GET requests to
 - Cache eligibility: **Eligible for cache**.
 - Edge TTL: **Use cache-control header if present, bypass cache if not**.
 - Browser TTL: **Respect origin TTL** (or leave the override unset).
-- Keep the default cache key, including the query string. Do not ignore `window`.
+- Keep the default cache key, including the **full query string**. Do not ignore
+  either `window` or `average`.
 - Do not set a fixed Edge TTL override or status-code TTL. The app supplies
   the short lifetime; the Free-plan fixed override minimum is unsuitable here.
 
@@ -75,16 +76,26 @@ app cache and leaves the database volume intact.
 ### Adding per-model charts
 
 The per-model load/request charts use the same cached `/api/scores` response
-and all eight existing window keys. Keep the deployed Cloudflare cache rule
+and all eight existing time windows. Keep the deployed Cloudflare cache rule
 unchanged. The image includes the new `model-charts.js` asset; no new service,
 environment variable, scheduled job, or proxy route is needed.
 
 On startup, an additive SQLite migration adds nullable count/average columns.
 Preserve the current `/data` volume: existing scores remain visible and new
 load/request history starts with the first collection after deployment.
-Do not backfill counts from scores. A full time-weighted count average requires
-15 minutes of covered history; partial coverage is labeled in the chart.
-Collection remains once per minute, and the score formula is unchanged.
+Do not backfill counts from scores. A full time-weighted average requires the
+selected duration of covered history; partial coverage is labeled in the chart.
+Collection remains once per minute, and the saved manager-score formula is unchanged.
+
+### v0.2.0: configurable moving averages
+
+The new picker defaults to 30m and supports 15m through 7d independently of the
+visible time window. Scores are smoothed from the saved manager-score history;
+counts are averaged from raw observations. No history is rewritten. The response
+adds `average_seconds`, release `version`, raw `saved_score`, and score coverage.
+The database adds a model/time index and retains 38 days (30d view + 7d lookback
+with a boundary margin). Preserve the same volume; existing history may have
+shorter coverage until new data accumulates. No new environment variable is needed.
 
 ## Analytics: Cloudflare only
 
@@ -119,14 +130,17 @@ Preserve the named `/data` volume and one replica.
 ## Acceptance checks
 
 1. Confirm GitHub Actions passed for the deployed commit.
-2. `/healthz` should return `{"ok":true}`.
-3. `/api/scores?window=7200` must receive new timestamped scores. Initial
-   scores use partial history; full rolling averages build over 15 minutes.
+2. `/healthz` should return `ok: true` and `version: "0.2.0"`.
+3. `/api/scores?window=7200&average=1800` must receive new timestamped scores.
+   Check the default average is 1800 seconds; startup averages label partial coverage.
 4. Check combined model lines, label toggles, and every time-window button.
    Per-model cards should appear below, ranked by score. Verify live-request
    and saved-score toggles, values above 100%, and that all charts follow the
    selected window. API rows should contain the new count fields (null for
    old history, populated for fresh samples).
+   Select a 7d average while keeping a 2h chart, then change the chart to 4h:
+   the average must stay 7d. Verify separate cache hits for different `average`
+   values; no Cloudflare purge is required when the new UI adds this query key.
 5. The old public traffic cards must be absent. GET `/api/traffic` and POST
    `/api/view` / `/api/heartbeat` must return 404, and the browser must no
    longer send these requests. Check Cloudflare Web Analytics separately.
@@ -163,7 +177,7 @@ imports to GitHub. Old rows outside retention are pruned normally.
   volume backup. Copying a live `.sqlite3` file alone can miss WAL data.
 - Keep backups private with bounded retention; older backups may still contain
   the retired visitor data.
-- Scores and count history are retained 31 days, pressure samples one hour. SQLite reuses
+- Scores and count history are retained 38 days, pressure samples one hour. SQLite reuses
   freed pages, so file size need not shrink immediately.
 - `/healthz` checks HTTP liveness. Monitor `last_sample_at` and `last_error`
   in `/api/scores` for upstream collection failures.

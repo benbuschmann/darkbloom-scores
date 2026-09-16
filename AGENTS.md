@@ -15,7 +15,11 @@ manager and not the owner's private local tracker.
   `node --test test_frontend.js`, and syntax checks
   before publishing changes. GitHub Actions also checks the Docker image.
 - Per-model charts share the existing cached `/api/scores` response. Preserve
-  Cloudflare cache headers and keys; do not invent historical counts from scores.
+  Cloudflare cache headers and full-query-string keys (`window` and `average`);
+  do not invent historical counts from scores. Moving averages apply to raw
+  counts and saved manager scores before downsampling; never rewrite raw scores.
+- Keep `VERSION`, Docker image metadata, and release notes consistent. Retain
+  enough lookback for a 7d average on a 30d chart (currently 38 days).
 - Dokploy handoff is in `DEPLOY_DOKPLOY.md`: one replica, persistent `/data`,
   container port 8788, HTTPS, Cloudflare analytics, score-retention checks.
 - Keep repo publication separate from deployment. Do not claim the site is

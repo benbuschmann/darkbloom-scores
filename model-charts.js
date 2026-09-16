@@ -8,6 +8,8 @@ const ModelCharts = (() => {
   const ratio = (requests, loaded) => finite(requests) && finite(loaded) && loaded > 0 ? requests / loaded * 100 : null;
   const percent = value => finite(value) ? `${number.format(value)}%` : '—';
   const scoreLabel = value => finite(value) ? value.toFixed(4) : '—';
+  const averageLabel = seconds => seconds >= 86400 ? `${number.format(seconds/86400)}d`
+    : seconds >= 3600 ? `${number.format(seconds/3600)}h` : `${number.format(seconds/60)}m`;
   const scale = (value, min, max, low, high) => low + (value - min) / (max - min || 1) * (high - low);
 
   function displayName(id) {
@@ -74,6 +76,7 @@ const ModelCharts = (() => {
     return date.toLocaleDateString([], {month: 'short', day: 'numeric'});
   }
   function draw(container, id, points, data) {
+    const duration = averageLabel(data.average_seconds);
     const width = Math.max(280, container.clientWidth);
     const showLive = !hiddenLive.has(id), showScore = !hiddenScore.has(id);
     const height = showScore ? 380 : 290;
@@ -87,7 +90,7 @@ const ModelCharts = (() => {
     const maxGap = Math.max(150000, data.bucket_seconds * 2500);
     const svg = svgNode('svg', {viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `${displayName(id)} loaded models, requests and score history`});
     svg.append(svgNode('title', {}, `${displayName(id)} model load`));
-    svg.append(svgNode('desc', {}, 'Green and blue use the same count scale. Green is the 15-minute loaded-model average; blue is the request average. Gray is the latest sampled request count. Score has its own aligned strip below.'));
+    svg.append(svgNode('desc', {}, `Green and blue use the same count scale. Green is the ${duration} loaded-model average; blue is the request average. Gray is the latest sampled request count. The ${duration} average of saved scores has its own aligned strip below.`));
     for (let i = 0; i <= 4; i++) svg.append(svgNode('line', {x1:left, x2:right, y1:y(max*i/4), y2:y(max*i/4), class:'grid'}));
     svg.append(svgNode('rect', {x:left, y:top, width:right-left, height:bottom-top, class:'frame'}));
     const series = [['average_loaded','loaded'], ['average_requests','requests']];
@@ -124,7 +127,7 @@ const ModelCharts = (() => {
       const sy = value => scale(value,0,maxScore,scoreBottom,scoreTop+13);
       svg.append(svgNode('line', {x1:left,x2:right,y1:scoreTop-13,y2:scoreTop-13,class:'grid'}));
       svg.append(svgNode('line', {x1:left,x2:right,y1:scoreBottom,y2:scoreBottom,class:'grid'}));
-      svg.append(svgNode('text', {x:left,y:scoreTop,class:'model-value score'}, width < 520 ? 'Score' : `Score · 0–${scoreLabel(maxScore)}`));
+      svg.append(svgNode('text', {x:left,y:scoreTop,class:'model-value score'}, width < 520 ? `${duration} score` : `${duration} avg score · 0–${scoreLabel(maxScore)}`));
       svg.append(svgNode('text', {x:right,y:scoreTop,'text-anchor':'end',class:'model-value score'}, `${width < 520 ? '' : 'Latest '}${scoreLabel(last.score)}`));
       svg.append(svgNode('path', {d:path(points,'score',x,sy,maxGap),class:'model-line score'}));
       if (finite(last.score)) svg.append(svgNode('circle', {cx:x(last.time),cy:sy(last.score),r:3,class:'model-point score'}));
@@ -134,7 +137,7 @@ const ModelCharts = (() => {
       const time=start+(end-start)*i/(ticks-1);
       svg.append(svgNode('text', {x:x(time),y:height-25,'text-anchor':i===0?'start':i===ticks-1?'end':'middle',class:'axis'},timeLabel(time,data.window_seconds)));
     }
-    svg.append(svgNode('text', {x:13,y:(top+bottom)/2,transform:`rotate(-90 13 ${(top+bottom)/2})`,'text-anchor':'middle',class:'axis-title'},'15m average count'));
+    svg.append(svgNode('text', {x:13,y:(top+bottom)/2,transform:`rotate(-90 13 ${(top+bottom)/2})`,'text-anchor':'middle',class:'axis-title'},`${duration} average count`));
     if (width >= 520) svg.append(svgNode('text', {x:width-5,y:(top+bottom)/2,transform:`rotate(90 ${width-5} ${(top+bottom)/2})`,'text-anchor':'middle',class:'axis-title'},'Relative to loaded models'));
     svg.append(svgNode('text', {x:(left+right)/2,y:height-4,'text-anchor':'middle',class:'axis-title'},'Shared time window'));
     container.replaceChildren(svg);
@@ -146,14 +149,15 @@ const ModelCharts = (() => {
     about.append(html('h2','',displayName(id)),html('div','model-id',id));
     const availability=html('div','model-availability'); about.append(availability);
     const metric=html('div','model-metric');
-    metric.append(html('div','metric-label','15m average requests / loaded models'));
+    const metricLabel=html('div','metric-label'); metric.append(metricLabel);
     const numbers=html('div','metric-numbers'), usage=html('strong','metric-usage'), score=html('span','metric-score');
     numbers.append(usage,score); metric.append(numbers); head.append(about,metric);
     const legend=html('div','model-legend');
-    legend.append(html('span','legend-title','15m averages'),html('span','legend-key loaded','Loaded models'),html('span','legend-key requests','Requests'));
+    const legendTitle=html('span','legend-title');
+    legend.append(legendTitle,html('span','legend-key loaded','Loaded models'),html('span','legend-key requests','Requests'));
     const chart=html('div','chart model-chart');
-    const state={article,availability,usage,score,chart,points:[],data:null};
-    for (const [label,color,hidden] of [['Live requests','live',hiddenLive],['Saved score','score',hiddenScore]]) {
+    const state={article,availability,usage,score,chart,metricLabel,legendTitle,points:[],data:null};
+    for (const [label,color,hidden] of [['Live requests','live',hiddenLive],['Score average','score',hiddenScore]]) {
       const button=html('button',`legend-key ${color}`,label);
       button.type='button'; button.setAttribute('aria-pressed',String(!hidden.has(id)));
       button.setAttribute('aria-label',`${label} for ${displayName(id)}`);
@@ -169,6 +173,7 @@ const ModelCharts = (() => {
     return state;
   }
   function render(container, data) {
+    const duration=averageLabel(data.average_seconds);
     const entries=groups(data.rows), active=new Set();
     for (const [id,points] of entries) {
       active.add(id);
@@ -176,17 +181,21 @@ const ModelCharts = (() => {
       const card=cards.get(id), last=points.at(-1);
       card.points=points; card.data=data;
       card.usage.textContent=percent(ratio(last.average_requests,last.average_loaded));
-      card.score.textContent=`Score ${scoreLabel(last.score)}`;
+      card.metricLabel.textContent=`${duration} average requests / loaded models`;
+      card.legendTitle.textContent=`${duration} averages`;
+      card.score.textContent=`Avg score ${scoreLabel(last.score)}`;
+      card.score.title=`${duration} moving average of saved manager scores. Latest unsmoothed manager score: ${scoreLabel(last.saved_score)}`;
       card.availability.textContent=finite(last.available_to_load) ? `${number.format(last.available_to_load)} available to load · latest sample` : 'Availability not recorded';
       const coverage=last.average_coverage_seconds;
-      card.note.textContent=!finite(coverage) ? 'Loaded/request history was not recorded for these earlier scores.' :
-        `One-minute snapshots · ${coverage < 900 ? `partial 15m average (${number.format(coverage/60)}m observed)` : 'full 15m average'} · gray is the sampled request count.`;
+      card.note.textContent=!finite(last.loaded) ? 'Loaded/request history was not recorded for these earlier scores. ' :
+        `${coverage < data.average_seconds ? `Partial ${duration} count average (${averageLabel(coverage)} observed)` : `Full ${duration} count average`}. `;
+      card.note.textContent+=`${last.score_coverage_seconds < data.average_seconds ? `Partial ${duration} score average (${averageLabel(last.score_coverage_seconds)} observed)` : `Full ${duration} score average`}. Gray is the unsmoothed minute-sampled request count.`;
       if (Date.parse(data.generated_at)-last.time>180000) card.note.textContent+=' Last model sample is delayed.';
       container.append(card.article);
       draw(card.chart,id,points,data);
     }
     for (const [id,card] of cards) if (!active.has(id)) { card.article.remove(); cards.delete(id); }
   }
-  return {render,ratio,groups,path,displayName};
+  return {render,ratio,groups,path,displayName,averageLabel};
 })();
 if (typeof module !== 'undefined') module.exports = ModelCharts;

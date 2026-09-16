@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
 import threading
@@ -29,6 +30,107 @@ class ScoreFeedTests(unittest.TestCase):
         fetch.assert_called_once_with("https://public.example/api/models/capacity")
         self.assertEqual(samples["model"].pressure, 1.7)
         self.assertEqual(samples["model"].available_to_load, 4)
+
+    def seed_history(self, now, seconds):
+        with self.store.connect() as db:
+            db.executemany(
+                "INSERT INTO scores(at,model_id,score,model_weight,sample_count,loaded,requests) VALUES(?,?,?,?,?,?,?)",
+                ((at, "averages", 0.1 if at < now - 900 else 0.3, 1, 15,
+                  10 if at < now - 900 else 30, 20 if at < now - 900 else 60)
+                 for at in range(now - seconds, now + 1, 60)),
+            )
+
+    def test_default_is_30_elapsed_minutes_and_score_source_is_preserved(self):
+        now = 1_700_000_040
+        self.seed_history(now, 7200)
+        default = self.store.read(7200, now)
+        self.assertEqual(default["average_seconds"], 1800)
+        self.assertEqual(default["version"], score_feed.APP_VERSION)
+        latest = default["rows"][-1]
+        self.assertEqual(latest["average_loaded"], 20)
+        self.assertEqual(latest["average_requests"], 40)
+        self.assertAlmostEqual(latest["score"], 0.2)
+        self.assertEqual(latest["saved_score"], 0.3)
+        self.assertEqual(latest["average_coverage_seconds"], 1800)
+        fifteen = self.store.read(7200, now, 900)["rows"][-1]
+        self.assertEqual(fifteen["average_loaded"], 30)
+        self.assertAlmostEqual(fifteen["score"], 0.3)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT score FROM scores WHERE at=?", (now,)).fetchone()[0], 0.3)
+
+    def test_week_average_reads_before_short_chart_and_survives_downsampling(self):
+        now = 1_700_000_040
+        self.seed_history(now, 604800 + 7200 + 60)
+        short = self.store.read(7200, now, 604800)
+        self.assertEqual(len(short["rows"]), 121)
+        self.assertEqual(short["rows"][0]["average_coverage_seconds"], 604800)
+        latest = short["rows"][-1]
+        self.assertEqual(latest["average_coverage_seconds"], 604800)
+        self.assertEqual(latest["score_coverage_seconds"], 604800)
+        self.assertAlmostEqual(latest["average_loaded"], (10 * (604800 - 900) + 30 * 900) / 604800)
+        self.assertAlmostEqual(latest["score"], (0.1 * (604800 - 900) + 0.3 * 900) / 604800)
+        for window in score_feed.WINDOW_BUCKETS:
+            last = self.store.read(window, now, 604800)["rows"][-1]
+            for field in ("score", "average_loaded", "average_requests", "average_coverage_seconds"):
+                self.assertEqual(last[field], latest[field])
+
+    def test_partial_coverage_and_missing_values_are_not_filled(self):
+        rows = [
+            {"at":0,"loaded":10,"requests":20,"score":1},
+            {"at":60,"loaded":None,"requests":None,"score":None},
+            {"at":120,"loaded":30,"requests":60,"score":3},
+            {"at":180,"loaded":30,"requests":60,"score":3},
+            {"at":3600,"loaded":50,"requests":100,"score":5},
+        ]
+        result = list(score_feed.moving_average_rows(rows, 1800))
+        self.assertEqual(result[0]["average_coverage_seconds"], 0)
+        self.assertIsNone(result[1]["score"])
+        self.assertIsNone(result[1]["average_loaded"])
+        self.assertEqual(result[3]["average_coverage_seconds"], 120)
+        self.assertEqual(result[3]["average_loaded"], 20)
+        self.assertEqual(result[3]["score"], 2)
+        self.assertEqual(result[4]["average_coverage_seconds"], 0)
+        self.assertEqual(result[4]["score"], 5)
+
+    def test_moving_average_clips_boundary_intervals_by_time(self):
+        rows = [{"at":at,"loaded":at,"requests":at*2,"score":at/100} for at in range(0, 1981, 120)]
+        actual = list(score_feed.moving_average_rows(rows, 900))[-1]
+        now = rows[-1]["at"]
+        expected = sum(max(0, min(now, b["at"]) - max(now-900, a["at"])) * a["loaded"] for a,b in zip(rows,rows[1:])) / 900
+        self.assertEqual(actual["average_coverage_seconds"], 900)
+        self.assertEqual(actual["average_loaded"], expected)
+        self.assertAlmostEqual(actual["score"], expected/100)
+
+    def test_average_cache_keys_are_independent_validated_and_lru_bounded(self):
+        now = 1_700_000_040
+        self.seed_history(now, 7200)
+        service = score_feed.ScoreService(self.store)
+        with patch.object(score_feed.time, "time", return_value=now), patch.object(score_feed.time, "monotonic", return_value=100):
+            thirty, ttl = service.read_scores(7200)
+            self.assertEqual(ttl, 30)
+            fifteen, _ = service.read_scores(7200, 900)
+            self.assertNotEqual(thirty, fifteen)
+            self.assertIs(service.read_scores(7200, 1800)[0], thirty)
+            for window in score_feed.WINDOW_BUCKETS:
+                for average in score_feed.AVERAGE_WINDOWS:
+                    body, ttl = service.read_scores(window, average)
+                    data = json.loads(body)
+                    self.assertEqual((data["window_seconds"],data["average_seconds"]), (window,average))
+                    self.assertEqual(ttl, 30)
+            self.assertEqual(len(service._scores_cache), score_feed.SCORE_CACHE_ENTRIES)
+            with self.assertRaises(ValueError):
+                service.read_scores(7200, 999)
+            with self.assertRaises(ValueError):
+                self.store.read(7200, now, 604801)
+
+    def test_retention_keeps_week_lookback_for_30_day_chart(self):
+        now = 1_700_000_040
+        with self.store.connect() as db:
+            db.executemany("INSERT INTO scores(at,model_id,score,model_weight,sample_count) VALUES(?, 'retained', 1, 1, 1)",
+                           [(now-37*86400,), (now-39*86400,)])
+        self.store.prune(now)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT at FROM scores").fetchall(), [(now-37*86400,)])
 
     def test_count_averages_are_elapsed_time_weighted_and_exclude_gaps(self) -> None:
         loaded, requests, seconds = score_feed.count_averages([(0, 10, 0), (60, 20, 20), (180, 30, 90)], 180)
@@ -63,7 +165,7 @@ class ScoreFeedTests(unittest.TestCase):
 
     def test_original_schema_upgrade_preserves_scores_without_inventing_counts(self) -> None:
         path = Path(self.directory.name) / "old-schema.sqlite3"
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db:
             db.executescript("""
                 CREATE TABLE pressure_samples(at INTEGER, model_id TEXT, pressure REAL, PRIMARY KEY(at,model_id));
                 CREATE TABLE scores(at INTEGER, model_id TEXT, score REAL, average_pressure REAL,
@@ -119,11 +221,12 @@ class ScoreFeedTests(unittest.TestCase):
         price = ModelPrice(1, 1)
         with patch.object(score_feed, "fetch_capacity", return_value={model: CapacitySample(model, 1, 2, 2)}), \
              patch.object(score_feed, "fetch_model_prices", return_value=({model: price}, price)), \
-             patch.object(score_feed.time, "time", return_value=now):
+             patch.object(score_feed.time, "time", return_value=now) as wall_clock:
             service.capture(now)
             body, _ = service.read_scores(7200)
             self.assertEqual(len(json.loads(body)["rows"]), 1)
             service.capture(now + 60)
+            wall_clock.return_value = now + 60
             body, _ = service.read_scores(7200)
             self.assertEqual(len(json.loads(body)["rows"]), 2)
 
@@ -156,7 +259,8 @@ class ScoreFeedTests(unittest.TestCase):
         payload = self.store.read(7200, now + 60)
         self.assertEqual(payload["bucket_seconds"], 60)
         self.assertEqual(len(payload["rows"]), 2)
-        self.assertAlmostEqual(payload["rows"][-1]["score"], 1.5 * 0.1805 * 1.25)
+        self.assertAlmostEqual(payload["rows"][-1]["saved_score"], 1.5 * 0.1805 * 1.25)
+        self.assertAlmostEqual(payload["rows"][-1]["score"], 2 * 0.1805 * 1.25)
         self.assertEqual(self.store.read(1800, now + 60)["rows"][-1]["model_id"], model_id)
         with self.assertRaises(ValueError):
             self.store.read(9999, now)
@@ -266,7 +370,17 @@ class ScoreFeedTests(unittest.TestCase):
             self.assertNotIn("no-transform", response.headers["Cache-Control"])
             self.assertIsNone(response.headers.get("Set-Cookie"))
         with urlopen(base + "/api/scores?window=7200", timeout=3) as response:
-            self.assertEqual(json.load(response)["rows"], [])
+            payload = json.load(response)
+            self.assertEqual(payload["rows"], [])
+            self.assertEqual(payload["average_seconds"], 1800)
+        with urlopen(base + "/api/scores?window=1800&average=604800", timeout=3) as response:
+            payload = json.load(response)
+            self.assertEqual((payload["window_seconds"], payload["average_seconds"]), (1800, 604800))
+        with self.assertRaises(HTTPError) as invalid_average:
+            urlopen(base + "/api/scores?window=7200&average=99999999", timeout=3)
+        self.assertEqual(invalid_average.exception.code, 400)
+        self.assertEqual(invalid_average.exception.headers["Cache-Control"], "no-store")
+        invalid_average.exception.close()
         with urlopen(base + "/model-charts.js", timeout=3) as response:
             self.assertIn("text/javascript", response.headers["Content-Type"])
             self.assertIn(b"Loaded models", response.read())

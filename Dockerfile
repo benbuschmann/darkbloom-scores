@@ -1,4 +1,5 @@
 FROM python:3.12-slim
+LABEL org.opencontainers.image.version="0.2.0"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -12,7 +13,7 @@ COPY fetch_manager.py LICENSE THIRD_PARTY.md ./
 RUN python fetch_manager.py \
     && mkdir /data \
     && chown 10001:10001 /data
-COPY server.py index.html model-charts.js ./
+COPY server.py index.html model-charts.js VERSION ./
 
 USER 10001:10001
 EXPOSE 8788

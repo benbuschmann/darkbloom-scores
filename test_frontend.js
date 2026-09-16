@@ -1,6 +1,29 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const charts = require('./model-charts.js');
+const fs = require('node:fs');
+const path = require('node:path');
+
+test('moving-average labels are independent of display windows', () => {
+  assert.equal(charts.averageLabel(900), '15m');
+  assert.equal(charts.averageLabel(1800), '30m');
+  assert.equal(charts.averageLabel(7200), '2h');
+  assert.equal(charts.averageLabel(604800), '7d');
+  const html = fs.readFileSync(path.join(__dirname,'index.html'),'utf8');
+  assert.match(html, /let windowSeconds = 7200/);
+  assert.match(html, /let averageSeconds = 1800/);
+  assert.match(html, /window=\$\{requestedWindow\}&average=\$\{requestedAverage\}/);
+  assert.match(html, /<option value="1800" selected>30 minutes/);
+  assert.match(html, /<option value="604800">7 days/);
+  assert.match(html, /Partial \$\{averageLabel\} score history/);
+});
+
+test('release version matches Docker metadata', () => {
+  const version = fs.readFileSync(path.join(__dirname,'VERSION'),'utf8').trim();
+  assert.equal(version,'0.2.0');
+  const dockerfile = fs.readFileSync(path.join(__dirname,'Dockerfile'),'utf8');
+  assert.ok(dockerfile.includes(`org.opencontainers.image.version="${version}"`));
+});
 
 test('requests above capacity are not capped, and missing/zero load is undefined', () => {
   assert.equal(charts.ratio(162, 100), 162);

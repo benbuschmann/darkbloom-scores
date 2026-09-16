@@ -27,6 +27,7 @@ jobs:
           docker run -d --name scores-test -p 127.0.0.1:8788:8788 -v scores-test:/data darkbloom-scores:test
           curl --fail --max-time 5 --retry 10 --retry-all-errors --retry-delay 1 http://127.0.0.1:8788/healthz
           curl --fail http://127.0.0.1:8788/api/scores?window=7200
+          curl --fail 'http://127.0.0.1:8788/api/scores?window=7200&average=604800' | python -c "import json,sys; d=json.load(sys.stdin); assert d['window_seconds']==7200 and d['average_seconds']==604800 and d['version']=='0.2.0'"
           curl --fail --output /dev/null http://127.0.0.1:8788/model-charts.js
           docker exec scores-test python -c "import sqlite3; c=sqlite3.connect('/data/scores.sqlite3'); c.execute('CREATE TABLE persistence_probe (value INTEGER)'); c.execute('INSERT INTO persistence_probe VALUES (42)'); c.commit()"
           docker stop scores-test

@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import signal
 import sqlite3
 import threading
 import time
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,9 +48,14 @@ WINDOW_BUCKETS = {
     2592000: 3600,
 }
 SAMPLE_WINDOW_SECONDS = 15 * 60
-SCORE_RETENTION_SECONDS = 31 * 86400
+AVERAGE_WINDOWS = (900, 1800, 3600, 7200, 14400, 43200, 86400, 604800)
+DEFAULT_AVERAGE_SECONDS = 1800
+# 30-day display + 7-day averaging lookback + one day for boundary samples.
+SCORE_RETENTION_SECONDS = 38 * 86400
 SCORE_CACHE_SECONDS = 30
+SCORE_CACHE_ENTRIES = 16
 WEB_PATH = Path(__file__).with_name("index.html")
+APP_VERSION = WEB_PATH.with_name("VERSION").read_text(encoding="utf-8").strip()
 COUNT_GAP_SECONDS = 150
 
 
@@ -107,6 +114,59 @@ def parse_utc(value: str) -> int:
     return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
 
 
+def moving_average_rows(rows, average_seconds: int):
+    """Stream one model's minute rows; smooth before display downsampling.
+
+    Counts and saved scores have separate coverage, so legacy score-only
+    history does not invent load data. Memory is bounded by one average window.
+    """
+    segments = deque()
+    totals = [0.0, 0.0, 0.0]  # loaded, requests, saved score × seconds
+    coverage = [0, 0]  # valid count duration, valid score duration
+    previous = None
+
+    def valid(value):
+        return value is not None and math.isfinite(value)
+
+    def account(segment, duration):
+        _, _, loaded, requests, score = segment
+        if valid(loaded) and valid(requests):
+            totals[0] += loaded * duration
+            totals[1] += requests * duration
+            coverage[0] += duration
+        if valid(score):
+            totals[2] += score * duration
+            coverage[1] += duration
+
+    for source in rows:
+        row = dict(source)
+        at = row["at"]
+        if previous is not None and 0 < at - previous["at"] <= COUNT_GAP_SECONDS:
+            segment = [previous["at"], at, previous["loaded"], previous["requests"], previous["score"]]
+            segments.append(segment)
+            account(segment, at - previous["at"])
+        cutoff = at - average_seconds
+        while segments and segments[0][1] <= cutoff:
+            segment = segments.popleft()
+            account(segment, segment[0] - segment[1])
+        if segments and segments[0][0] < cutoff:
+            account(segments[0], segments[0][0] - cutoff)
+            segments[0][0] = cutoff
+        if not coverage[0]:
+            totals[0] = totals[1] = 0.0
+        if not coverage[1]:
+            totals[2] = 0.0
+        # A first observation is provisional; its coverage is explicitly zero.
+        row["average_loaded"] = max(0.0, totals[0] / coverage[0]) if coverage[0] and valid(row["loaded"]) else row["loaded"]
+        row["average_requests"] = max(0.0, totals[1] / coverage[0]) if coverage[0] and valid(row["requests"]) else row["requests"]
+        row["saved_score"] = row["score"]
+        row["score"] = max(0.0, totals[2] / coverage[1]) if coverage[1] and valid(row["score"]) else row["score"]
+        row["average_coverage_seconds"] = coverage[0]
+        row["score_coverage_seconds"] = coverage[1]
+        previous = source
+        yield row
+
+
 class ScoreStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -136,6 +196,7 @@ class ScoreStore:
                     PRIMARY KEY (at, model_id)
                 );
                 CREATE INDEX IF NOT EXISTS scores_time ON scores(at);
+                CREATE INDEX IF NOT EXISTS scores_model_time ON scores(model_id, at);
             """)
             # Additive migration: existing score rows stay valid; unavailable
             # historical counts remain NULL, not invented zeroes.
@@ -261,35 +322,41 @@ class ScoreStore:
             )
         return len(latest_by_minute)
 
-    def read(self, window: int, now: int) -> dict[str, object]:
+    def read(self, window: int, now: int, average: int = DEFAULT_AVERAGE_SECONDS) -> dict[str, object]:
         if window not in WINDOW_BUCKETS:
             raise ValueError("unsupported time window")
+        if average not in AVERAGE_WINDOWS:
+            raise ValueError("unsupported moving average")
         bucket = WINDOW_BUCKETS[window]
+        start = now - window
+        lookback = start - average - COUNT_GAP_SECONDS
+        result = []
         with self.connect() as db:
             db.row_factory = sqlite3.Row
             latest = db.execute("SELECT MAX(at) FROM scores").fetchone()[0]
-            rows = db.execute("""
-                WITH last_in_bucket AS (
-                    SELECT model_id, at / ? AS bucket, MAX(at) AS at
-                    FROM scores WHERE at >= ?
-                    GROUP BY model_id, bucket
-                )
-                SELECT scores.at, scores.model_id, scores.score, scores.loaded, scores.requests,
-                       scores.available_to_load, scores.average_loaded, scores.average_requests,
-                       scores.average_coverage_seconds
-                FROM scores JOIN last_in_bucket
-                  ON scores.model_id = last_in_bucket.model_id AND scores.at = last_in_bucket.at
-                ORDER BY scores.at, scores.model_id
-            """, (bucket, now - window)).fetchall()
+            models = db.execute("SELECT DISTINCT model_id FROM scores WHERE at>=? AND at<=?", (start, now)).fetchall()
+            for model in models:
+                rows = db.execute("""
+                    SELECT at, model_id, score, loaded, requests, available_to_load
+                    FROM scores WHERE model_id=? AND at>=? AND at<=? ORDER BY at
+                """, (model[0], lookback, now))
+                buckets = {}
+                for row in moving_average_rows(rows, average):
+                    if row["at"] >= start:
+                        buckets[row["at"] // bucket] = row
+                result.extend(buckets.values())
+        result.sort(key=lambda row: (row["at"], row["model_id"]))
         return {
-            "schema_version": 2,
+            "schema_version": 3,
+            "version": APP_VERSION,
             "generated_at": iso_utc(now),
             "last_sample_at": iso_utc(latest) if latest is not None else None,
             "window_seconds": window,
+            "average_seconds": average,
             "bucket_seconds": bucket,
             "rows": [
                 {"observed_at": iso_utc(row["at"]), **{key: row[key] for key in row.keys() if key != "at"}}
-                for row in rows
+                for row in result
             ],
         }
 
@@ -318,23 +385,29 @@ class ScoreService:
         self.store = store
         self.prices = PriceCache()
         self.last_error: str | None = None
-        # Eight supported windows bound memory use; the lock also prevents a
-        # burst of visitors from computing the same uncached window repeatedly.
+        # Independently keyed windows/averages, with bounded LRU memory use.
+        # The lock coalesces a burst of visitors requesting the same response.
         self._scores_lock = threading.Lock()
-        self._scores_cache: dict[int, tuple[float, bytes, bool]] = {}
+        self._scores_cache: OrderedDict[tuple[int, int], tuple[float, bytes, bool]] = OrderedDict()
 
-    def read_scores(self, window: int) -> tuple[bytes, int]:
+    def read_scores(self, window: int, average: int = DEFAULT_AVERAGE_SECONDS) -> tuple[bytes, int]:
         if window not in WINDOW_BUCKETS:
             raise ValueError("unsupported time window")
+        if average not in AVERAGE_WINDOWS:
+            raise ValueError("unsupported moving average")
+        key = (window, average)
         with self._scores_lock:
-            cached = self._scores_cache.get(window)
+            cached = self._scores_cache.get(key)
             if cached is None or time.monotonic() >= cached[0]:
-                payload = self.store.read(window, int(time.time()))
+                payload = self.store.read(window, int(time.time()), average)
                 payload["last_error"] = self.last_error
                 body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
                 healthy = self.last_error is None and payload["last_sample_at"] is not None
                 cached = (time.monotonic() + SCORE_CACHE_SECONDS, body, healthy)
-                self._scores_cache[window] = cached
+                self._scores_cache[key] = cached
+            self._scores_cache.move_to_end(key)
+            while len(self._scores_cache) > SCORE_CACHE_ENTRIES:
+                self._scores_cache.popitem(last=False)
             expires, body, healthy = cached
             # Deduct time spent in the app cache so CDN caching does not add
             # another complete freshness period on top of an old response.
@@ -383,14 +456,16 @@ class ScoreHandler(BaseHTTPRequestHandler):
             self.send_bytes(WEB_PATH.with_name("model-charts.js").read_bytes(), "text/javascript; charset=utf-8")
             return
         if parsed.path == "/healthz":
-            self.send_json({"ok": True})
+            self.send_json({"ok": True, "version": APP_VERSION})
             return
         if parsed.path != "/api/scores":
             self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
             return
         try:
-            window = int(parse_qs(parsed.query).get("window", ["7200"])[0])
-            body, ttl = self.server.service.read_scores(window)  # type: ignore[attr-defined]
+            query = parse_qs(parsed.query)
+            window = int(query.get("window", ["7200"])[0])
+            average = int(query.get("average", [str(DEFAULT_AVERAGE_SECONDS)])[0])
+            body, ttl = self.server.service.read_scores(window, average)  # type: ignore[attr-defined]
         except (ValueError, sqlite3.Error) as error:
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             return

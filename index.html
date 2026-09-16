@@ -25,6 +25,12 @@
     .card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:15px; flex-wrap:wrap; }
     .subtitle { margin:4px 0 0; color:var(--muted); font-size:11px; }
     .ranges { display:flex; flex-wrap:wrap; gap:5px; }
+    .window-label { color:var(--muted); font-size:11px; align-self:center; margin-right:3px; }
+    .average-controls { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; margin-top:18px; padding-top:12px; border-top:1px solid var(--line); }
+    .average-controls label { font-size:12px; }
+    .average-controls select { color:var(--text); background:var(--bg); border:1px solid var(--blue); border-radius:6px; padding:6px 10px; font:inherit; }
+    .average-controls p { margin:0; color:var(--muted); font-size:11px; }
+    .release-version { font-size:10px; font-weight:400; color:var(--muted); white-space:nowrap; }
     button { border:1px solid var(--line); border-radius:6px; padding:5px 8px; background:transparent; color:var(--muted); font:inherit; cursor:pointer; }
     button:hover,button:focus-visible { border-color:var(--blue); color:var(--text); }
     .range[aria-pressed="true"] { border-color:var(--blue); background:var(--blue); color:var(--bg); font-weight:700; }
@@ -83,16 +89,17 @@
   <main>
     <header>
       <div>
-        <h1>Darkbloom model scores</h1>
-        <p class="intro">Live public network pressure × blended token price × the manager’s default model weight. A comparison signal, not anyone’s actual earnings.</p>
+        <h1>Darkbloom model scores <span id="release-version" class="release-version"></span></h1>
+        <p class="intro">Public network pressure × blended token price × the manager’s default model weight. Score charts smooth the saved scores over your chosen moving average. A comparison signal, not actual earnings.</p>
       </div>
       <a class="top-link" href="https://github.com/benbuschmann/darkbloom-manager">View the manager source ↗</a>
     </header>
     <div id="status" class="status"><span class="status-dot"></span><span id="status-text">Loading score history…</span></div>
     <section class="card" aria-labelledby="chart-title">
       <div class="card-head">
-        <div><h2 id="chart-title">All model scores</h2><p class="subtitle">One shared vertical scale · one score point per model per minute</p></div>
+        <div><h2 id="chart-title">All model scores</h2><p id="score-subtitle" class="subtitle">30m moving average · one shared score scale</p></div>
         <nav class="ranges" aria-label="Chart time window">
+          <span class="window-label">Show history</span>
           <button class="range" data-window="1800" aria-pressed="false">30m</button>
           <button class="range" data-window="3600" aria-pressed="false">1h</button>
           <button class="range" data-window="7200" aria-pressed="true">2h</button>
@@ -103,11 +110,26 @@
           <button class="range" data-window="2592000" aria-pressed="false">30d</button>
         </nav>
       </div>
+      <div class="average-controls">
+        <label for="moving-average">Moving average</label>
+        <select id="moving-average">
+          <option value="900">15 minutes</option>
+          <option value="1800" selected>30 minutes</option>
+          <option value="3600">1 hour</option>
+          <option value="7200">2 hours</option>
+          <option value="14400">4 hours</option>
+          <option value="43200">12 hours</option>
+          <option value="86400">24 hours</option>
+          <option value="604800">7 days</option>
+        </select>
+        <p>Applies to scores, loaded models, and requests. Independent of history shown; gray live requests stay unsmoothed.</p>
+      </div>
+      <p id="average-coverage" class="explain"></p>
       <div id="chart" class="chart" role="img" aria-label="All model scores over time"></div>
       <div id="chart-actions" class="chart-actions"></div>
       <p class="explain">Labels sit beside the newest point when its score is at least 0.0001. Click a label to hide that line. Collection gaps stay gaps.</p>
     </section>
-    <div class="models-heading"><h2>Model load &amp; requests</h2><p>Same time window as above · sorted by latest saved score · 15-minute averages, not snapshot counts</p></div>
+    <div class="models-heading"><h2>Model load &amp; requests</h2><p id="models-subtitle">Same history and moving-average controls · sorted by latest averaged score</p></div>
     <section id="model-cards" aria-label="Per-model charts"></section>
   </main>
   <script src="model-charts.js"></script>
@@ -121,6 +143,7 @@
     const scoreFormat = new Intl.NumberFormat(undefined, { maximumSignificantDigits: 4 });
     const colors = ['#58a6ff','#e3b341','#3fb950','#d2a8ff','#ff7b72','#79c0ff','#f2cc60','#56d4dd','#ffa657','#bc8cff','#7ee787','#ff9bce'];
     let windowSeconds = 7200;
+    let averageSeconds = 1800;
     let data = null;
     let refreshRequest = 0;
 
@@ -173,7 +196,15 @@
       return date.toLocaleDateString([], {month:'short',day:'numeric'});
     }
     function render() {
-      if (!data) return;
+      if (!data || data.window_seconds !== windowSeconds || data.average_seconds !== averageSeconds) return;
+      const averageLabel = ModelCharts.averageLabel(data.average_seconds);
+      document.querySelector('#release-version').textContent = data.version ? `v${data.version}` : '';
+      document.querySelector('#score-subtitle').textContent = `${averageLabel} moving average of saved manager scores · one shared score scale`;
+      document.querySelector('#models-subtitle').textContent = `${averageLabel} moving average · same history window as above · sorted by latest averaged score`;
+      const latestRows = new Map(data.rows.map(row => [row.model_id,row]));
+      const partial = [...latestRows.values()].filter(row => Number.isFinite(row.score) && row.score_coverage_seconds < data.average_seconds);
+      document.querySelector('#average-coverage').textContent = partial.length
+        ? `Partial ${averageLabel} score history for ${partial.length} model${partial.length === 1 ? '' : 's'}: only recorded intervals are averaged. See each model's coverage below.` : '';
       const width = Math.max(280, Math.floor(chart.clientWidth));
       const height = 330;
       const left = width < 520 ? 58 : 70;
@@ -192,7 +223,7 @@
       const visible = modelIds.filter(id => !hidden.has(id));
       const maxScore = Math.max(0.01,...visible.flatMap(id => grouped.get(id).map(point => Number.isFinite(point.score) ? point.score : 0))) * 1.08;
       const y = value => scale(value,0,maxScore,bottom,top);
-      const svg = element('svg',{viewBox:`0 0 ${width} ${height}`,'aria-label':`All model scores for the last ${windowSeconds/3600} hours`});
+      const svg = element('svg',{viewBox:`0 0 ${width} ${height}`,'aria-label':`All model scores: ${averageLabel} moving average, showing ${windowSeconds/3600} hours of history`});
       svg.append(element('title',{},'All model scores'));
       for (let i=0; i<=4; i++) {
         const value = maxScore*i/4;
@@ -234,7 +265,7 @@
         svg.append(group);
       }
       if (!modelIds.length) svg.append(element('text',{x:(left+right)/2,y:(top+bottom)/2,'text-anchor':'middle',class:'axis'},'No saved scores in this window yet'));
-      svg.append(element('text',{x:13,y:(top+bottom)/2,transform:`rotate(-90 13 ${(top+bottom)/2})`,'text-anchor':'middle',class:'axis-title'},'Score'));
+      svg.append(element('text',{x:13,y:(top+bottom)/2,transform:`rotate(-90 13 ${(top+bottom)/2})`,'text-anchor':'middle',class:'axis-title'},`${averageLabel} average score`));
       svg.append(element('text',{x:(left+right)/2,y:height-3,'text-anchor':'middle',class:'axis-title'},'Time'));
       chart.replaceChildren(svg);
       actions.replaceChildren();
@@ -250,8 +281,9 @@
     async function refreshScores() {
       const request = ++refreshRequest;
       const requestedWindow = windowSeconds;
+      const requestedAverage = averageSeconds;
       try {
-        const response = await fetch(`api/scores?window=${requestedWindow}`);
+        const response = await fetch(`api/scores?window=${requestedWindow}&average=${requestedAverage}`);
         if (!response.ok) throw new Error(`Feed returned ${response.status}`);
         const payload = await response.json();
         if (request !== refreshRequest) return;
@@ -273,6 +305,11 @@
       document.querySelectorAll('.range').forEach(item => item.setAttribute('aria-pressed',String(item===button)));
       refreshScores();
     }));
+    document.querySelector('#moving-average').addEventListener('change',event => {
+      averageSeconds = Number(event.target.value);
+      statusText.textContent = `Loading ${ModelCharts.averageLabel(averageSeconds)} moving averages…`;
+      refreshScores();
+    });
     document.addEventListener('visibilitychange',() => { if (!document.hidden) refreshScores(); });
     new ResizeObserver(render).observe(chart);
     refreshScores();
