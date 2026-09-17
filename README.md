@@ -1,6 +1,6 @@
 # Darkbloom Scores
 
-Current release: **v0.2.0**.
+Current release: **v0.2.1**.
 
 A small public website comparing all Darkbloom model scores over time. One
 Python service collects public capacity and pricing, saves SQLite history, and
@@ -12,14 +12,14 @@ or running Mac is needed.
 ## Features and scope
 
 - Combined score chart with abbreviated, clickable endpoint labels.
-- Per-model charts ranked by latest averaged score: green loaded-model and blue
+- Per-model charts ranked by latest pressure score: green loaded-model and blue
   request averages, a toggleable light-gray live request line, and a toggleable
-  score-average strip. Each card shows its latest average utilization and score.
+  pressure-score strip. Each card shows its latest average utilization and score.
 - 30m, 1h, **2h default**, 4h, 12h, 24h, 7d, and 30d chart windows.
 - Independent moving-average picker: 15m, **30m default**, 1h, 2h, 4h, 12h,
   24h, or 7d. Applies to counts and score charts; live requests stay unsmoothed.
 - One cached response shared by all charts, keyed by both controls.
-- Minute collection; the underlying manager score formula stays unchanged.
+- Minute collection; one pressure average, using the manager's score formula.
 - 38-day public score/count retention, including averaging lookback;
   visitor analytics handled separately by Cloudflare.
 - Dockerfile, offline tests, GitHub Actions image and persistence checks.
@@ -30,22 +30,30 @@ credentials. The repo starts without historical data. Collection begins when
 deployed; earlier windows stay empty unless public score history is imported
 separately.
 
-Existing deployments keep their saved scores. The added load/request fields
-start collecting after this update is deployed; old counts remain unknown,
-not zero. A full average needs that much recorded history; partial coverage
-is labeled separately for counts and scores.
+Existing deployments keep their saved history. Corrected scores are computed
+from recorded raw counts, price, and weight without rewriting the database.
+Older score-only records remain stored but cannot produce corrected chart
+scores; they appear as gaps, not zero. A full average needs that much recorded
+history; partial coverage is labeled separately for counts and pressure.
 
 ## Scoring
 
 ```text
 pressure = active_requests / max(1, warm_providers)
 blended_price = 0.85 × input_price + 0.15 × output_price
-score = average_pressure_over_last_15_minutes × blended_price × model_weight
+score = mean(pressure samples in the selected window) × blended_price × model_weight
 ```
 
-The average uses timestamped minute samples strictly inside the last 900
-seconds, at most 15 samples—not the last 15 observations regardless of age.
+The default is **30 minutes**: take the arithmetic mean of raw minute pressure
+samples in `(timestamp − 1800 seconds, timestamp]`, including the current sample,
+with at most 30 samples. Other selected windows use the same method, not simply
+the last N observations regardless of age. This matches the manager for the
+same samples, price, and weight; different sampling times can differ slightly.
 Startup/gaps use only available samples; missing history is not invented.
+Multiply only after averaging pressure, using the price and weight recorded at
+each plotted timestamp. Do not average already-smoothed scores or reprice old
+history using today's price. For example, `0.007875 × 0.08225 × 1 = 0.00064771875`
+(the combined chart's three-decimal label is `0.001`).
 Prices refresh every 15 minutes. On pricing errors, cached prices remain in
 use with a warning; no usable price means a null score.
 
@@ -65,19 +73,22 @@ Public sources, accessed without credentials:
 independently. A 7d average on a 2h chart reads the preceding seven days for
 every plotted point; it does not average only the visible two hours.
 
-The server averages raw counts and saved manager scores over elapsed seconds,
-before display downsampling. Each observation is held until the next sample;
-intervals longer than 150 seconds are excluded as collection gaps. Counts and
-scores have separate coverage. A first observation is provisional with zero
-minutes observed. Unknown values remain gaps, not zeroes. Partial history is
-labeled rather than being presented as a full average.
+The server averages raw counts over elapsed seconds before display downsampling.
+Each count observation is held until the next sample; intervals longer than
+150 seconds are excluded as collection gaps. Score pressure instead uses the
+manager's arithmetic sample mean described above. Count time coverage and
+pressure sample coverage are labeled separately. A first observation is
+provisional; unknown values remain gaps, not zeroes.
 
-The displayed score is a moving average **of the saved 15-minute manager
-scores**, not a change to the underlying manager formula above. The source
-score remains saved unchanged and is also returned as `saved_score` in the API.
-The combined chart, amber strip, card score, and sort order all use the selected
-score average. The headline percentage is average requests divided by average
-loaded models, not the mean of individual sample percentages.
+The combined chart, amber strip, card score, and sort order all use the same
+single pressure average multiplied by price and weight. The headline percentage
+is average requests divided by average loaded models, not the mean of individual
+sample percentages. Count averaging is unchanged by the score fix.
+
+For compatibility/audit, the collector still saves its original 15-minute
+manager score and returns it as `saved_score`. That legacy value is **never**
+input to the displayed score calculation. v0.2.0 incorrectly averaged those
+saved scores a second time; v0.2.1 corrects this without rewriting history.
 
 Green, blue, and gray share one count scale. The right-hand green reference is
 100%; blue can cross above it. Gray is the latest **minute-sampled** request
@@ -146,10 +157,14 @@ point, not another average. Averages are computed from the original minute
 observations plus lookback, never from downsampled points. The UI marks the feed delayed
 after three minutes.
 
-API schema version 3 includes the selected `average_seconds`, app `version`,
-and each row's raw `loaded`, `requests`, `available_to_load`, and `saved_score`,
-alongside `average_loaded`, `average_requests`, and smoothed `score`. Coverage
-is reported as `average_coverage_seconds` and `score_coverage_seconds`.
+API schema version 4 includes the selected `average_seconds`, app `version`,
+and `score_method: "mean_pressure_times_price_weight"`. Each row includes raw
+`loaded`, `requests`, `available_to_load`, `pressure`, and legacy `saved_score`,
+alongside `average_loaded`, `average_requests`, `average_pressure`, corrected
+`score`, `blended_price_usd`, `model_weight`, and `pressure_sample_count`.
+Count time coverage is `average_coverage_seconds`; `score_coverage_seconds`
+reports the same raw-input time coverage for compatibility, not score weighting.
+Pressure completeness uses `pressure_sample_count` versus `average_seconds / 60`.
 Unknown historical counts stay null. Omitted `average` defaults to 1800 seconds;
 unsupported average/window values return 400 without caching.
 
@@ -159,6 +174,8 @@ shared-cache headers. Cloudflare must retain **the full query string** in its
 cache key; the existing default-key rule needs no change. Retention is 38 days
 so even the start of a 30d chart can have a full 7d averaging lookback once enough
 data has accumulated. Existing records are preserved; no backfill is invented.
+During a rollout, the new UI rejects a legacy cached payload instead of labeling
+its double-averaged values as corrected; the normal refresh retries after expiry.
 
 ## Cloudflare analytics and privacy
 

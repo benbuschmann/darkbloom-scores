@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 import server as score_feed
 import fetch_manager
-from warm_model_manager import CapacitySample, ModelPrice
+from warm_model_manager import CapacitySample, ModelPrice, update_pressure_history, revenue_scores
 
 
 class ScoreFeedTests(unittest.TestCase):
@@ -34,9 +34,9 @@ class ScoreFeedTests(unittest.TestCase):
     def seed_history(self, now, seconds):
         with self.store.connect() as db:
             db.executemany(
-                "INSERT INTO scores(at,model_id,score,model_weight,sample_count,loaded,requests) VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO scores(at,model_id,score,model_weight,sample_count,loaded,requests,blended_price_usd) VALUES(?,?,?,?,?,?,?,?)",
                 ((at, "averages", 0.1 if at < now - 900 else 0.3, 1, 15,
-                  10 if at < now - 900 else 30, 20 if at < now - 900 else 60)
+                  10 if at < now - 900 else 30, 10 if at < now - 900 else 90, 0.1)
                  for at in range(now - seconds, now + 1, 60)),
             )
 
@@ -46,10 +46,14 @@ class ScoreFeedTests(unittest.TestCase):
         default = self.store.read(7200, now)
         self.assertEqual(default["average_seconds"], 1800)
         self.assertEqual(default["version"], score_feed.APP_VERSION)
+        self.assertEqual(default["schema_version"], 4)
+        self.assertEqual(default["score_method"], "mean_pressure_times_price_weight")
         latest = default["rows"][-1]
         self.assertEqual(latest["average_loaded"], 20)
-        self.assertEqual(latest["average_requests"], 40)
-        self.assertAlmostEqual(latest["score"], 0.2)
+        self.assertEqual(latest["average_requests"], 50)
+        self.assertAlmostEqual(latest["average_pressure"], (14 + 16*3) / 30)
+        self.assertAlmostEqual(latest["score"], (14 + 16*3) / 30 * 0.1)
+        self.assertNotEqual(latest["average_pressure"], latest["average_requests"] / latest["average_loaded"])
         self.assertEqual(latest["saved_score"], 0.3)
         self.assertEqual(latest["average_coverage_seconds"], 1800)
         fifteen = self.store.read(7200, now, 900)["rows"][-1]
@@ -68,7 +72,7 @@ class ScoreFeedTests(unittest.TestCase):
         self.assertEqual(latest["average_coverage_seconds"], 604800)
         self.assertEqual(latest["score_coverage_seconds"], 604800)
         self.assertAlmostEqual(latest["average_loaded"], (10 * (604800 - 900) + 30 * 900) / 604800)
-        self.assertAlmostEqual(latest["score"], (0.1 * (604800 - 900) + 0.3 * 900) / 604800)
+        self.assertAlmostEqual(latest["score"], (0.1 * (10080 - 16) + 0.3 * 16) / 10080)
         for window in score_feed.WINDOW_BUCKETS:
             last = self.store.read(window, now, 604800)["rows"][-1]
             for field in ("score", "average_loaded", "average_requests", "average_coverage_seconds"):
@@ -82,7 +86,7 @@ class ScoreFeedTests(unittest.TestCase):
             {"at":180,"loaded":30,"requests":60,"score":3},
             {"at":3600,"loaded":50,"requests":100,"score":5},
         ]
-        result = list(score_feed.moving_average_rows(rows, 1800))
+        result = list(score_feed.moving_average_rows(({**row,"blended_price_usd":1,"model_weight":1} for row in rows), 1800))
         self.assertEqual(result[0]["average_coverage_seconds"], 0)
         self.assertIsNone(result[1]["score"])
         self.assertIsNone(result[1]["average_loaded"])
@@ -90,16 +94,71 @@ class ScoreFeedTests(unittest.TestCase):
         self.assertEqual(result[3]["average_loaded"], 20)
         self.assertEqual(result[3]["score"], 2)
         self.assertEqual(result[4]["average_coverage_seconds"], 0)
-        self.assertEqual(result[4]["score"], 5)
+        self.assertEqual(result[4]["score"], 2)
 
     def test_moving_average_clips_boundary_intervals_by_time(self):
-        rows = [{"at":at,"loaded":at,"requests":at*2,"score":at/100} for at in range(0, 1981, 120)]
+        rows = [{"at":at,"loaded":at,"requests":at*2,"score":at/100,"blended_price_usd":1,"model_weight":1} for at in range(0, 1981, 120)]
         actual = list(score_feed.moving_average_rows(rows, 900))[-1]
         now = rows[-1]["at"]
         expected = sum(max(0, min(now, b["at"]) - max(now-900, a["at"])) * a["loaded"] for a,b in zip(rows,rows[1:])) / 900
         self.assertEqual(actual["average_coverage_seconds"], 900)
         self.assertEqual(actual["average_loaded"], expected)
-        self.assertAlmostEqual(actual["score"], expected/100)
+        self.assertAlmostEqual(actual["score"], 2)
+        self.assertEqual(actual["pressure_sample_count"], 8)
+
+    def test_nemotron_reproduction_averages_pressure_once(self):
+        rows = [{"at":at,"loaded":8000,"requests":63,"score":0.065089,
+                 "blended_price_usd":0.08225,"model_weight":1} for at in range(0,1801,60)]
+        rows[-1]["score"] = 0.000580
+        latest = list(score_feed.moving_average_rows(rows,1800))[-1]
+        self.assertAlmostEqual(latest["average_pressure"],0.007875)
+        self.assertAlmostEqual(latest["score"],0.00064771875)
+        self.assertEqual(latest["saved_score"],0.000580)
+        self.assertEqual(latest["pressure_sample_count"],30)
+        self.assertEqual(f'{latest["score"]:.3f}', '0.001')
+
+    def test_spike_expires_at_selected_window_not_45_minutes(self):
+        rows = [{"at":i*60,"loaded":1,"requests":1000 if i==0 else 0,
+                 "score":1000/(i+1) if i<15 else 0,"blended_price_usd":1,"model_weight":1}
+                for i in range(31)]
+        result = list(score_feed.moving_average_rows(rows,1800))
+        self.assertGreater(result[-2]["score"],0)
+        self.assertEqual(result[-1]["score"],0)
+        self.assertGreater(sum(row["score"] for row in rows[-30:])/30,0)  # Old double average would linger.
+
+    def test_direct_score_matches_manager_for_same_raw_samples(self):
+        history = {}
+        model = "nvidia-nemotron-3.5-lightning"
+        price = ModelPrice(0.08,0.095)
+        rows = [{"at":at,"loaded":i,"requests":i+2,"score":999,
+                 "blended_price_usd":price.blended_usd,"model_weight":1.25}
+                for i,at in enumerate((0,60,120,600,660,1860,1920))]
+        actual = list(score_feed.moving_average_rows(rows,1800))
+        for row,result in zip(rows,actual):
+            pressure = row["requests"] / max(1,row["loaded"])
+            sample = CapacitySample(model,row["loaded"],row["requests"],pressure)
+            history, averages = update_pressure_history([model],{model:sample},history,30,row["at"],1800)
+            expected = revenue_scores(averages,{model:1.25},{model:price})[model]
+            self.assertAlmostEqual(result["average_pressure"],averages[model])
+            self.assertAlmostEqual(result["score"],expected)
+
+    def test_price_and_weight_apply_after_pressure_averaging(self):
+        rows = [{"at":0,"loaded":10,"requests":10,"score":999,"blended_price_usd":100,"model_weight":10},
+                {"at":60,"loaded":10,"requests":30,"score":999,"blended_price_usd":0.08225,"model_weight":1}]
+        last = list(score_feed.moving_average_rows(rows,1800))[-1]
+        self.assertEqual(last["average_pressure"],2)
+        self.assertAlmostEqual(last["score"],2*0.08225)
+        for field in ("blended_price_usd","model_weight","loaded","requests"):
+            bad = {**rows[-1],field:None}
+            self.assertIsNone(list(score_feed.moving_average_rows([rows[0],bad],1800))[-1]["score"])
+
+    def test_legacy_scores_without_raw_counts_are_not_reused_as_pressure(self):
+        row = {"at":0,"loaded":None,"requests":None,"score":10,"blended_price_usd":1,"model_weight":1}
+        result = list(score_feed.moving_average_rows([row],1800))[0]
+        self.assertIsNone(result["score"])
+        self.assertIsNone(result["average_pressure"])
+        self.assertEqual(result["saved_score"],10)
+        self.assertEqual(result["pressure_sample_count"],0)
 
     def test_average_cache_keys_are_independent_validated_and_lru_bounded(self):
         now = 1_700_000_040
@@ -175,7 +234,8 @@ class ScoreFeedTests(unittest.TestCase):
         for _ in range(2):
             old = score_feed.ScoreStore(path)
             row = old.read(7200, 1_700_000_040)["rows"][0]
-            self.assertEqual(row["score"], 0.75)
+            self.assertIsNone(row["score"])
+            self.assertEqual(row["saved_score"], 0.75)
             for key in ("loaded", "requests", "average_loaded", "average_requests", "available_to_load"):
                 self.assertIsNone(row[key])
 
@@ -260,7 +320,7 @@ class ScoreFeedTests(unittest.TestCase):
         self.assertEqual(payload["bucket_seconds"], 60)
         self.assertEqual(len(payload["rows"]), 2)
         self.assertAlmostEqual(payload["rows"][-1]["saved_score"], 1.5 * 0.1805 * 1.25)
-        self.assertAlmostEqual(payload["rows"][-1]["score"], 2 * 0.1805 * 1.25)
+        self.assertAlmostEqual(payload["rows"][-1]["score"], 1.5 * 0.1805 * 1.25)
         self.assertEqual(self.store.read(1800, now + 60)["rows"][-1]["model_id"], model_id)
         with self.assertRaises(ValueError):
             self.store.read(9999, now)
@@ -279,7 +339,7 @@ class ScoreFeedTests(unittest.TestCase):
         price = ModelPrice(1, 1)
         self.store.record({model: CapacitySample(model, 1, 100, 100)}, {model: price}, price, now)
         self.store.record({model: CapacitySample(model, 1, 2, 2)}, {model: price}, price, now + 900)
-        rows = self.store.read(7200, now + 900)["rows"]
+        rows = self.store.read(7200, now + 900,900)["rows"]
         self.assertEqual(rows[-1]["score"], 2)
         self.assertEqual(len(rows), 2)
 
@@ -305,7 +365,9 @@ class ScoreFeedTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(self.store.import_csv(path), 1)
-        self.assertEqual(self.store.read(7200, 1_700_000_100)["rows"][0]["score"], 0.25)
+        row = self.store.read(7200, 1_700_000_100)["rows"][0]
+        self.assertEqual(row["saved_score"], 0.25)
+        self.assertIsNone(row["score"])
 
     def test_seeds_only_recent_load_samples(self) -> None:
         now = 1_700_000_100

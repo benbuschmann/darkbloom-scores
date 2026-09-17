@@ -90,7 +90,7 @@
     <header>
       <div>
         <h1>Darkbloom model scores <span id="release-version" class="release-version"></span></h1>
-        <p class="intro">Public network pressure × blended token price × the manager’s default model weight. Score charts smooth the saved scores over your chosen moving average. A comparison signal, not actual earnings.</p>
+        <p class="intro">Average network pressure × blended token price × the manager’s default model weight. Pressure is averaged once over your chosen window—never an average of saved scores. A comparison signal, not actual earnings.</p>
       </div>
       <a class="top-link" href="https://github.com/benbuschmann/darkbloom-manager">View the manager source ↗</a>
     </header>
@@ -129,7 +129,7 @@
       <div id="chart-actions" class="chart-actions"></div>
       <p class="explain">Labels sit beside the newest point when its score is at least 0.0001. Click a label to hide that line. Collection gaps stay gaps.</p>
     </section>
-    <div class="models-heading"><h2>Model load &amp; requests</h2><p id="models-subtitle">Same history and moving-average controls · sorted by latest averaged score</p></div>
+    <div class="models-heading"><h2>Model load &amp; requests</h2><p id="models-subtitle">Same history and moving-average controls · sorted by latest pressure score</p></div>
     <section id="model-cards" aria-label="Per-model charts"></section>
   </main>
   <script src="model-charts.js"></script>
@@ -199,12 +199,15 @@
       if (!data || data.window_seconds !== windowSeconds || data.average_seconds !== averageSeconds) return;
       const averageLabel = ModelCharts.averageLabel(data.average_seconds);
       document.querySelector('#release-version').textContent = data.version ? `v${data.version}` : '';
-      document.querySelector('#score-subtitle').textContent = `${averageLabel} moving average of saved manager scores · one shared score scale`;
-      document.querySelector('#models-subtitle').textContent = `${averageLabel} moving average · same history window as above · sorted by latest averaged score`;
+      document.querySelector('#score-subtitle').textContent = `${averageLabel} mean pressure × price × weight · averaged once`;
+      document.querySelector('#models-subtitle').textContent = `${averageLabel} moving average · same history window as above · sorted by latest pressure score`;
       const latestRows = new Map(data.rows.map(row => [row.model_id,row]));
-      const partial = [...latestRows.values()].filter(row => Number.isFinite(row.score) && row.score_coverage_seconds < data.average_seconds);
-      document.querySelector('#average-coverage').textContent = partial.length
-        ? `Partial ${averageLabel} score history for ${partial.length} model${partial.length === 1 ? '' : 's'}: only recorded intervals are averaged. See each model's coverage below.` : '';
+      const partial = [...latestRows.values()].filter(row => row.pressure_sample_count < data.average_seconds/60);
+      const unavailable = [...latestRows.values()].filter(row => !Number.isFinite(row.score));
+      document.querySelector('#average-coverage').textContent = [
+        partial.length ? `Partial ${averageLabel} pressure history for ${partial.length} model${partial.length === 1 ? '' : 's'}: only recorded raw samples are averaged.` : '',
+        unavailable.length ? `${unavailable.length} model score(s) unavailable: raw counts or historical pricing are missing.` : '',
+      ].filter(Boolean).join(' ');
       const width = Math.max(280, Math.floor(chart.clientWidth));
       const height = 330;
       const left = width < 520 ? 58 : 70;
@@ -264,8 +267,8 @@
         group.addEventListener('keydown',event => { if (event.key==='Enter'||event.key===' ') { event.preventDefault(); hidden.add(label.id); render(); } });
         svg.append(group);
       }
-      if (!modelIds.length) svg.append(element('text',{x:(left+right)/2,y:(top+bottom)/2,'text-anchor':'middle',class:'axis'},'No saved scores in this window yet'));
-      svg.append(element('text',{x:13,y:(top+bottom)/2,transform:`rotate(-90 13 ${(top+bottom)/2})`,'text-anchor':'middle',class:'axis-title'},`${averageLabel} average score`));
+      if (!visible.some(id => grouped.get(id).some(point => Number.isFinite(point.score)))) svg.append(element('text',{x:(left+right)/2,y:(top+bottom)/2,'text-anchor':'middle',class:'axis'},'No pressure scores available in this window'));
+      svg.append(element('text',{x:13,y:(top+bottom)/2,transform:`rotate(-90 13 ${(top+bottom)/2})`,'text-anchor':'middle',class:'axis-title'},`${averageLabel} pressure score`));
       svg.append(element('text',{x:(left+right)/2,y:height-3,'text-anchor':'middle',class:'axis-title'},'Time'));
       chart.replaceChildren(svg);
       actions.replaceChildren();
@@ -287,6 +290,9 @@
         if (!response.ok) throw new Error(`Feed returned ${response.status}`);
         const payload = await response.json();
         if (request !== refreshRequest) return;
+        if (payload.score_method !== 'mean_pressure_times_price_weight') {
+          throw new Error('Cached feed is from the previous release; retrying on the next refresh');
+        }
         data = payload;
         render();
         const age = data.last_sample_at ? Date.now()-Date.parse(data.last_sample_at) : Infinity;

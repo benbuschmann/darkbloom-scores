@@ -90,7 +90,7 @@ const ModelCharts = (() => {
     const maxGap = Math.max(150000, data.bucket_seconds * 2500);
     const svg = svgNode('svg', {viewBox: `0 0 ${width} ${height}`, role: 'img', 'aria-label': `${displayName(id)} loaded models, requests and score history`});
     svg.append(svgNode('title', {}, `${displayName(id)} model load`));
-    svg.append(svgNode('desc', {}, `Green and blue use the same count scale. Green is the ${duration} loaded-model average; blue is the request average. Gray is the latest sampled request count. The ${duration} average of saved scores has its own aligned strip below.`));
+    svg.append(svgNode('desc', {}, `Green and blue use the same count scale. Green is the ${duration} loaded-model average; blue is the request average. Gray is the latest sampled request count. Score averages raw pressure once over ${duration}, then multiplies by price and weight, in a separate strip below.`));
     for (let i = 0; i <= 4; i++) svg.append(svgNode('line', {x1:left, x2:right, y1:y(max*i/4), y2:y(max*i/4), class:'grid'}));
     svg.append(svgNode('rect', {x:left, y:top, width:right-left, height:bottom-top, class:'frame'}));
     const series = [['average_loaded','loaded'], ['average_requests','requests']];
@@ -127,7 +127,7 @@ const ModelCharts = (() => {
       const sy = value => scale(value,0,maxScore,scoreBottom,scoreTop+13);
       svg.append(svgNode('line', {x1:left,x2:right,y1:scoreTop-13,y2:scoreTop-13,class:'grid'}));
       svg.append(svgNode('line', {x1:left,x2:right,y1:scoreBottom,y2:scoreBottom,class:'grid'}));
-      svg.append(svgNode('text', {x:left,y:scoreTop,class:'model-value score'}, width < 520 ? `${duration} score` : `${duration} avg score · 0–${scoreLabel(maxScore)}`));
+      svg.append(svgNode('text', {x:left,y:scoreTop,class:'model-value score'}, width < 520 ? `${duration} score` : `${duration} pressure score · 0–${scoreLabel(maxScore)}`));
       svg.append(svgNode('text', {x:right,y:scoreTop,'text-anchor':'end',class:'model-value score'}, `${width < 520 ? '' : 'Latest '}${scoreLabel(last.score)}`));
       svg.append(svgNode('path', {d:path(points,'score',x,sy,maxGap),class:'model-line score'}));
       if (finite(last.score)) svg.append(svgNode('circle', {cx:x(last.time),cy:sy(last.score),r:3,class:'model-point score'}));
@@ -157,7 +157,7 @@ const ModelCharts = (() => {
     legend.append(legendTitle,html('span','legend-key loaded','Loaded models'),html('span','legend-key requests','Requests'));
     const chart=html('div','chart model-chart');
     const state={article,availability,usage,score,chart,metricLabel,legendTitle,points:[],data:null};
-    for (const [label,color,hidden] of [['Live requests','live',hiddenLive],['Score average','score',hiddenScore]]) {
+    for (const [label,color,hidden] of [['Live requests','live',hiddenLive],['Pressure score','score',hiddenScore]]) {
       const button=html('button',`legend-key ${color}`,label);
       button.type='button'; button.setAttribute('aria-pressed',String(!hidden.has(id)));
       button.setAttribute('aria-label',`${label} for ${displayName(id)}`);
@@ -183,13 +183,16 @@ const ModelCharts = (() => {
       card.usage.textContent=percent(ratio(last.average_requests,last.average_loaded));
       card.metricLabel.textContent=`${duration} average requests / loaded models`;
       card.legendTitle.textContent=`${duration} averages`;
-      card.score.textContent=`Avg score ${scoreLabel(last.score)}`;
-      card.score.title=`${duration} moving average of saved manager scores. Latest unsmoothed manager score: ${scoreLabel(last.saved_score)}`;
+      card.score.textContent=`Score ${scoreLabel(last.score)}`;
+      card.score.title=finite(last.score)
+        ? `${duration} mean pressure ${last.average_pressure.toFixed(6)} × $${last.blended_price_usd.toFixed(6)}/M blended price × ${last.model_weight} weight. ${last.pressure_sample_count} raw samples; averaged once.`
+        : 'Score unavailable: raw counts or the historical price/weight are missing. Legacy saved scores are not used as a substitute.';
       card.availability.textContent=finite(last.available_to_load) ? `${number.format(last.available_to_load)} available to load · latest sample` : 'Availability not recorded';
       const coverage=last.average_coverage_seconds;
       card.note.textContent=!finite(last.loaded) ? 'Loaded/request history was not recorded for these earlier scores. ' :
         `${coverage < data.average_seconds ? `Partial ${duration} count average (${averageLabel(coverage)} observed)` : `Full ${duration} count average`}. `;
-      card.note.textContent+=`${last.score_coverage_seconds < data.average_seconds ? `Partial ${duration} score average (${averageLabel(last.score_coverage_seconds)} observed)` : `Full ${duration} score average`}. Gray is the unsmoothed minute-sampled request count.`;
+      card.note.textContent+=`${last.pressure_sample_count < data.average_seconds/60 ? 'Partial' : 'Full'} ${duration} pressure window (${last.pressure_sample_count}/${data.average_seconds/60} minute samples). Gray is the unsmoothed request count.`;
+      if (!finite(last.score)) card.note.textContent+=' Score unavailable: raw counts or historical pricing are missing.';
       if (Date.parse(data.generated_at)-last.time>180000) card.note.textContent+=' Last model sample is delayed.';
       container.append(card.article);
       draw(card.chart,id,points,data);

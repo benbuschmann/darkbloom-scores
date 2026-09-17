@@ -81,18 +81,22 @@ unchanged. The image includes the new `model-charts.js` asset; no new service,
 environment variable, scheduled job, or proxy route is needed.
 
 On startup, an additive SQLite migration adds nullable count/average columns.
-Preserve the current `/data` volume: existing scores remain visible and new
-load/request history starts with the first collection after deployment.
+Preserve the current `/data` volume: existing records remain stored and new
+load/request history starts with the first collection after deployment. Corrected
+scores require raw count history; legacy score-only records appear as gaps.
 Do not backfill counts from scores. A full time-weighted average requires the
 selected duration of covered history; partial coverage is labeled in the chart.
 Collection remains once per minute, and the saved manager-score formula is unchanged.
 
-### v0.2.0: configurable moving averages
+### v0.2.1: single pressure average and configurable windows
 
 The new picker defaults to 30m and supports 15m through 7d independently of the
-visible time window. Scores are smoothed from the saved manager-score history;
-counts are averaged from raw observations. No history is rewritten. The response
-adds `average_seconds`, release `version`, raw `saved_score`, and score coverage.
+visible time window. Scores now average raw pressure once, then multiply by the
+price and weight recorded at that observation. This fixes v0.2.0's extra average
+of saved 15-minute scores. Count lines retain elapsed-time averaging. No history
+is rewritten and no database migration is needed for this fix. API schema 4
+adds `score_method`, pressure, average pressure, raw sample count, price, and weight.
+Legacy `saved_score` remains available for audit, never as a fallback score.
 The database adds a model/time index and retains 38 days (30d view + 7d lookback
 with a boundary margin). Preserve the same volume; existing history may have
 shorter coverage until new data accumulates. No new environment variable is needed.
@@ -130,17 +134,21 @@ Preserve the named `/data` volume and one replica.
 ## Acceptance checks
 
 1. Confirm GitHub Actions passed for the deployed commit.
-2. `/healthz` should return `ok: true` and `version: "0.2.0"`.
+2. `/healthz` should return `ok: true` and `version: "0.2.1"`.
 3. `/api/scores?window=7200&average=1800` must receive new timestamped scores.
    Check the default average is 1800 seconds; startup averages label partial coverage.
+   Verify `score_method` is `mean_pressure_times_price_weight` and each non-null
+   score equals `average_pressure × blended_price_usd × model_weight`.
 4. Check combined model lines, label toggles, and every time-window button.
    Per-model cards should appear below, ranked by score. Verify live-request
-   and saved-score toggles, values above 100%, and that all charts follow the
+   and pressure-score toggles, values above 100%, and that all charts follow the
    selected window. API rows should contain the new count fields (null for
    old history, populated for fresh samples).
    Select a 7d average while keeping a 2h chart, then change the chart to 4h:
    the average must stay 7d. Verify separate cache hits for different `average`
-   values; no Cloudflare purge is required when the new UI adds this query key.
+   values. The cache rule stays unchanged; old payloads may take up to the normal
+   30-second TTL to expire. The new UI rejects old scoring-method payloads and
+   retries on the next refresh rather than showing them as corrected.
 5. The old public traffic cards must be absent. GET `/api/traffic` and POST
    `/api/view` / `/api/heartbeat` must return 404, and the browser must no
    longer send these requests. Check Cloudflare Web Analytics separately.

@@ -115,34 +115,41 @@ def parse_utc(value: str) -> int:
 
 
 def moving_average_rows(rows, average_seconds: int):
-    """Stream one model's minute rows; smooth before display downsampling.
+    """Average raw pressure once, then price it at the plotted observation.
 
-    Counts and saved scores have separate coverage, so legacy score-only
-    history does not invent load data. Memory is bounded by one average window.
+    Match the manager's arithmetic mean of samples in (t - window, t],
+    including the current sample. Count lines keep elapsed-time weighting.
+    Legacy saved scores are returned for audit only, never as calculation input.
     """
     segments = deque()
-    totals = [0.0, 0.0, 0.0]  # loaded, requests, saved score × seconds
-    coverage = [0, 0]  # valid count duration, valid score duration
+    pressures = deque()
+    pressure_total = 0.0
+    totals = [0.0, 0.0]  # loaded, requests × seconds
+    coverage = 0
+    max_samples = average_seconds // 60
     previous = None
 
     def valid(value):
-        return value is not None and math.isfinite(value)
+        return value is not None and math.isfinite(value) and value >= 0
+
+    def pressure(row):
+        if valid(row["loaded"]) and valid(row["requests"]):
+            return row["requests"] / max(1, row["loaded"])
+        return None
 
     def account(segment, duration):
-        _, _, loaded, requests, score = segment
+        nonlocal coverage
+        _, _, loaded, requests = segment
         if valid(loaded) and valid(requests):
             totals[0] += loaded * duration
             totals[1] += requests * duration
-            coverage[0] += duration
-        if valid(score):
-            totals[2] += score * duration
-            coverage[1] += duration
+            coverage += duration
 
     for source in rows:
         row = dict(source)
         at = row["at"]
         if previous is not None and 0 < at - previous["at"] <= COUNT_GAP_SECONDS:
-            segment = [previous["at"], at, previous["loaded"], previous["requests"], previous["score"]]
+            segment = [previous["at"], at, previous["loaded"], previous["requests"]]
             segments.append(segment)
             account(segment, at - previous["at"])
         cutoff = at - average_seconds
@@ -152,17 +159,30 @@ def moving_average_rows(rows, average_seconds: int):
         if segments and segments[0][0] < cutoff:
             account(segments[0], segments[0][0] - cutoff)
             segments[0][0] = cutoff
-        if not coverage[0]:
+        if not coverage:
             totals[0] = totals[1] = 0.0
-        if not coverage[1]:
-            totals[2] = 0.0
+        while pressures and pressures[0][0] <= cutoff:
+            pressure_total -= pressures.popleft()[1]
+        if not pressures:
+            pressure_total = 0.0
+        current_pressure = pressure(row)
+        if current_pressure is not None:
+            pressures.append((at, current_pressure))
+            pressure_total += current_pressure
+        while len(pressures) > max_samples:
+            pressure_total -= pressures.popleft()[1]
+        average_pressure = max(0.0, pressure_total / len(pressures)) if pressures and current_pressure is not None else None
+        price, weight = row.get("blended_price_usd"), row.get("model_weight")
         # A first observation is provisional; its coverage is explicitly zero.
-        row["average_loaded"] = max(0.0, totals[0] / coverage[0]) if coverage[0] and valid(row["loaded"]) else row["loaded"]
-        row["average_requests"] = max(0.0, totals[1] / coverage[0]) if coverage[0] and valid(row["requests"]) else row["requests"]
+        row["average_loaded"] = max(0.0, totals[0] / coverage) if coverage and valid(row["loaded"]) else row["loaded"]
+        row["average_requests"] = max(0.0, totals[1] / coverage) if coverage and valid(row["requests"]) else row["requests"]
         row["saved_score"] = row["score"]
-        row["score"] = max(0.0, totals[2] / coverage[1]) if coverage[1] and valid(row["score"]) else row["score"]
-        row["average_coverage_seconds"] = coverage[0]
-        row["score_coverage_seconds"] = coverage[1]
+        row["pressure"] = current_pressure
+        row["average_pressure"] = average_pressure
+        row["pressure_sample_count"] = len(pressures)
+        row["score"] = average_pressure * price * weight if average_pressure is not None and valid(price) and price > 0 and valid(weight) else None
+        row["average_coverage_seconds"] = coverage
+        row["score_coverage_seconds"] = coverage  # Raw-input time coverage; not a score weighting.
         previous = source
         yield row
 
@@ -337,7 +357,8 @@ class ScoreStore:
             models = db.execute("SELECT DISTINCT model_id FROM scores WHERE at>=? AND at<=?", (start, now)).fetchall()
             for model in models:
                 rows = db.execute("""
-                    SELECT at, model_id, score, loaded, requests, available_to_load
+                    SELECT at, model_id, score, loaded, requests, available_to_load,
+                           blended_price_usd, model_weight
                     FROM scores WHERE model_id=? AND at>=? AND at<=? ORDER BY at
                 """, (model[0], lookback, now))
                 buckets = {}
@@ -347,7 +368,8 @@ class ScoreStore:
                 result.extend(buckets.values())
         result.sort(key=lambda row: (row["at"], row["model_id"]))
         return {
-            "schema_version": 3,
+            "schema_version": 4,
+            "score_method": "mean_pressure_times_price_weight",
             "version": APP_VERSION,
             "generated_at": iso_utc(now),
             "last_sample_at": iso_utc(latest) if latest is not None else None,

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1 — 2026-09-16
+
+- Fix double-averaged scores: average raw requests / max(1, loaded) once over
+  the selected window, then multiply by the observation's blended price and
+  model weight. The default 30m score now matches the manager's method for
+  identical samples, prices, and weights; spikes expire at the selected cutoff.
+- Use corrected scores for the combined chart, model strips, headlines, and
+  ranking. Explain the formula and raw sample coverage in the UI.
+- Preserve stored history and the legacy `saved_score` for audit. Rows lacking
+  raw counts or historical pricing show gaps, never inferred corrections.
+- Return API schema 4 with the score method, raw/average pressure, sample count,
+  price, and weight. Reject old cached score payloads until they expire.
+- Keep count averages, independent controls, collection, retention, and caching
+  unchanged. Add manager-equivalence and lingering-spike regression tests.
+
 ## 0.2.0 — 2026-09-16
 
 - Default chart moving averages to 30 minutes, with an independent picker for

@@ -16,8 +16,10 @@ manager and not the owner's private local tracker.
   before publishing changes. GitHub Actions also checks the Docker image.
 - Per-model charts share the existing cached `/api/scores` response. Preserve
   Cloudflare cache headers and full-query-string keys (`window` and `average`);
-  do not invent historical counts from scores. Moving averages apply to raw
-  counts and saved manager scores before downsampling; never rewrite raw scores.
+  do not invent historical counts from scores. Average raw pressure once over
+  the selected window, then multiply by that observation's price and weight.
+  Never average saved scores or reuse them when raw inputs are missing. Count
+  lines keep elapsed-time weighting. Average before downsampling; preserve storage.
 - Keep `VERSION`, Docker image metadata, and release notes consistent. Retain
   enough lookback for a 7d average on a 30d chart (currently 38 days).
 - Dokploy handoff is in `DEPLOY_DOKPLOY.md`: one replica, persistent `/data`,
