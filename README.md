@@ -217,6 +217,16 @@ API.
 Independent community project. [MIT license](LICENSE).
 # Optional public provider estimate pages
 
+Set `TRACK_ALL_PUBLIC_PROVIDERS=1` to record every public provider from the same
+shared minute stats pull. `/providers` is a paginated directory searchable by
+ID, chip or model; `/providers/<provider-id>` shows each observed registration's
+hourly estimates. Departed IDs keep their recorded history. Unknown IDs return
+404 and never trigger an upstream request or create database records.
+Directory entries never disclose private aggregate-page slugs or account
+membership. Your configured fleet pages continue working separately, unlisted.
+Provider API responses use a 64-entry, 30-second server cache, invalidated on
+collection or errors. No additional Cloudflare rule is necessary.
+
 Set `PROVIDER_PAGES_JSON` to a JSON object mapping a page slug to an ordered
 list of public provider IDs, or set `PROVIDER_PAGES_FILE` to a private JSON file
 with the same structure. Keep real identity configuration outside Git.

@@ -9,6 +9,9 @@ manager and not the owner's private local tracker.
   identity configuration outside Git, expose public chip-name labels, and
   label network-ratio-based token values as estimates, not payouts. Base
   rewards, per-provider input tokens, and historical model attribution are unknown.
+- All-public-provider collection is authorized when TRACK_ALL_PUBLIC_PROVIDERS=1.
+  Directory entries contain public IDs only; never enumerate private fleet links
+  or inferred account membership. Retain hourly aggregates, not raw snapshots.
 - Visitor analytics belong in Cloudflare. Do not reintroduce app-side IP/session
   storage, heartbeat endpoints, public traffic counters, or proxy attribution.
 - Never publish `.env`, SQLite databases, CSV history, visitor IP records,

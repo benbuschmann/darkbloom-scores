@@ -18,6 +18,7 @@ const num=v=>v==null?'Unavailable':Math.round(v).toLocaleString();
 const hour=t=>new Date(t*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric'});
 async function refresh(){try{
  const r=await fetch('/api/providers/'+location.pathname.split('/').pop());if(!r.ok)throw Error('Page unavailable');const d=await r.json();
+ document.querySelector('h1').textContent=d.page_title||'Provider · public estimates';
  const rows=d.rows, models=[...new Set(rows.filter(x=>x.estimated_usd!=null).map(x=>x.model))];
  const total=rows.reduce((s,x)=>s+(x.estimated_usd||0),0);document.querySelector('#total').textContent=rows.length?money(total)+' estimated'+(rows.some(x=>x.estimated_usd==null)?' + unpriced tokens':''):'Collecting history…';
  document.querySelector('#status').textContent=d.warning||(!d.last_sample_at?'Waiting for the first public sample.': 'Latest public sample: '+new Date(d.last_sample_at*1000).toLocaleString()+(d.now-d.last_sample_at>150?' · Collection is stale':'')+' · History is partial until collection has run for 24 hours.');

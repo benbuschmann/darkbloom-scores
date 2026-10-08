@@ -19,6 +19,8 @@ jobs:
         run: node -e "new Function(require('fs').readFileSync('index.html','utf8').match(/<script>([\s\S]*?)<\/script>/)[1])"
       - name: Check provider-page syntax
         run: node -e "new Function(require('fs').readFileSync('providers.html','utf8').match(/<script>([\s\S]*?)<\/script>/)[1])"
+      - name: Check provider-directory syntax
+        run: node -e "new Function(require('fs').readFileSync('provider-directory.html','utf8').match(/<script>([\s\S]*?)<\/script>/)[1])"
       - name: Test per-model chart logic
         run: node --test test_frontend.js
       - name: Build image

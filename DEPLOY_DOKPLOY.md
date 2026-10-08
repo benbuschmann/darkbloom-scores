@@ -103,6 +103,19 @@ shorter coverage until new data accumulates. No new environment variable is need
 
 ## Analytics: Cloudflare only
 
+### v0.4.0: all public providers
+
+Enable `TRACK_ALL_PUBLIC_PROVIDERS=1` while retaining `PROVIDER_PAGES_JSON` and
+the same persistent volume. One shared stats request collects every provider
+each minute; /providers provides searchable pagination, and individual pages
+use /providers/<public-provider-id>. Configured fleet slugs remain unlisted.
+Startup adds hardware metadata and a retention index, without rewriting usage;
+an upgrade from the earlier provider schema first makes an online backup at
+`/data/scores.sqlite3.before-all-public-providers.backup`. Keep this private.
+Provider responses retain no-store edge headers; a bounded server-side cache
+coalesces reads for 30 seconds and clears on capture/errors. Existing score
+Cloudflare cache rules remain unchanged. No new Darkbloom credential is needed.
+
 ### v0.3.0: opt-in public provider estimates
 
 Set `PROVIDER_PAGES_JSON` to the slug-to-ID-list configuration outside Git.

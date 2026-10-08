@@ -2,30 +2,35 @@
 import json
 import sqlite3
 import os
-from contextlib import contextmanager
+import re
+from contextlib import contextmanager, closing
 from pathlib import Path
 
 
 class ProviderPages:
-    def __init__(self, path, pages):
+    def __init__(self, path, pages, track_all=False):
         self.path = Path(path)
         self.pages = pages
-        if not pages:
+        self.track_all = track_all
+        self.enabled = bool(pages or track_all)
+        if not self.enabled:
             return
         with self.connect() as db:
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='public_provider_samples'").fetchone()
-            if not exists:
-                backup = self.path.with_name(self.path.name + '.before-provider-pages.backup')
+            all_schema = db.execute("SELECT 1 FROM sqlite_master WHERE name='public_provider_hardware'").fetchone()
+            if not exists or (track_all and not all_schema):
+                suffix='.before-all-public-providers.backup' if exists else '.before-provider-pages.backup'
+                backup = self.path.with_name(self.path.name + suffix)
                 # Create once without overwriting; fail startup if backup fails.
                 try:
                     fd = os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 except FileExistsError:
-                    with sqlite3.connect(f'file:{backup}?mode=ro', uri=True) as saved:
+                    with closing(sqlite3.connect(f'file:{backup}?mode=ro', uri=True)) as saved:
                         if saved.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                             raise RuntimeError('Provider-page migration backup is invalid')
                 else:
                     os.close(fd)
-                    with sqlite3.connect(backup) as saved:
+                    with closing(sqlite3.connect(backup)) as saved:
                         db.backup(saved)
                         if saved.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                             raise RuntimeError('Provider-page migration backup failed')
@@ -36,6 +41,8 @@ class ProviderPages:
                     provider TEXT PRIMARY KEY, at INTEGER, model TEXT, tokens INTEGER);
                 CREATE TABLE IF NOT EXISTS public_provider_chips (
                     provider TEXT PRIMARY KEY, chip TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS public_provider_hardware (
+                    provider TEXT PRIMARY KEY, ram INTEGER, status TEXT);
                 CREATE TABLE IF NOT EXISTS public_provider_usage (
                     provider TEXT, hour INTEGER, model TEXT, output INTEGER,
                     PRIMARY KEY(provider,hour,model));
@@ -44,7 +51,29 @@ class ProviderPages:
                 CREATE TABLE IF NOT EXISTS public_hour_prices (
                     hour INTEGER, model TEXT, input REAL, output REAL,
                     PRIMARY KEY(hour,model));
+                CREATE INDEX IF NOT EXISTS public_provider_usage_hour ON public_provider_usage(hour);
             ''')
+
+    def ids_for(self, slug):
+        if slug in self.pages:
+            return self.pages[slug]
+        if self.track_all and re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', slug):
+            with self.connect() as db:
+                if db.execute('SELECT 1 FROM public_provider_samples WHERE provider=?',(slug,)).fetchone():
+                    return [slug]
+        raise KeyError('Unknown provider page')
+
+    def directory(self, search='', offset=0):
+        # Never enumerate private aggregate-page slugs or account memberships.
+        query='%'+search[:64].replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
+        with self.connect() as db:
+            sql="""FROM public_provider_samples s LEFT JOIN public_provider_chips c ON c.provider=s.provider
+                   LEFT JOIN public_provider_hardware h ON h.provider=s.provider
+                   WHERE s.provider LIKE ? ESCAPE '\\' OR c.chip LIKE ? ESCAPE '\\' OR s.model LIKE ? ESCAPE '\\'"""
+            args=(query,query,query)
+            count=db.execute('SELECT COUNT(*) '+sql,args).fetchone()[0]
+            rows=db.execute('SELECT s.provider,c.chip,h.ram,h.status,s.model,s.at '+sql+' ORDER BY s.provider LIMIT 100 OFFSET ?',args+(offset,)).fetchall()
+        return dict(total=count,offset=offset,limit=100,rows=[dict(provider_id=p,chip=c or 'Unknown chip',ram=ram,status=st or 'unknown',model=m,last_seen=at) for p,c,ram,st,m,at in rows])
 
     @contextmanager
     def connect(self):
@@ -70,15 +99,24 @@ class ProviderPages:
                                (now // 3600 * 3600, model, price.input_usd, price.output_usd))
             for row in payload.get('providers', []):
                 pid = row.get('id')
-                if pid not in wanted:
+                if not isinstance(pid,str) or (not self.track_all and pid not in wanted):
                     continue
+                if self.track_all and not re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}',pid):
+                    continue
+                value=row.get('tokens_generated')
+                # Missing counters are unknown, not a reset to zero.
+                if isinstance(value,bool) or not isinstance(value,int) or value<0:
+                    value=None
                 chip = str(row.get('chip') or '').strip()[:80]
                 if chip:
                     db.execute('INSERT OR REPLACE INTO public_provider_chips VALUES(?,?)', (pid,chip))
+                ram=row.get('memory_gb')
+                ram=ram if isinstance(ram,int) and not isinstance(ram,bool) and ram>=0 else None
+                db.execute('INSERT OR REPLACE INTO public_provider_hardware VALUES(?,?,?)',(pid,ram,str(row.get('status') or 'unknown')[:32]))
                 model = row.get('current_model') or ''
-                tokens = int(row['tokens_generated'])
+                tokens = value
                 previous = db.execute('SELECT at,model,tokens FROM public_provider_samples WHERE provider=?', (pid,)).fetchone()
-                if previous and 0 < now - previous[0] <= 150 and tokens >= previous[2]:
+                if previous and tokens is not None and previous[2] is not None and 0 < now - previous[0] <= 150 and tokens >= previous[2]:
                     delta = tokens - previous[2]
                     attributed = model if model and model == previous[1] else 'Unattributed model switch'
                     # Split a boundary interval proportionally, never count lifetime totals.
@@ -97,12 +135,12 @@ class ProviderPages:
                 db.execute(f'DELETE FROM {table} WHERE {field}<?', (cutoff,))
 
     def read(self, slug, now):
-        ids = self.pages[slug]
+        ids = self.ids_for(slug)
         start = (now-23*3600)//3600*3600
         rows = []
         with self.connect() as db:
-            chips = dict(db.execute('SELECT provider,chip FROM public_provider_chips'))
-            names = [chips.get(pid, f'Computer {chr(65+n)}') for n,pid in enumerate(ids)]
+            chips = {pid:(db.execute('SELECT chip FROM public_provider_chips WHERE provider=?',(pid,)).fetchone() or [''])[0] for pid in ids}
+            names = [chips.get(pid) or f'Computer {chr(65+n)}' for n,pid in enumerate(ids)]
             labels = [f'{name} · {1+names[:n].count(name)}' if names.count(name)>1 else name for n,name in enumerate(names)]
             ratios = {h: (i/o if o else None) for h,i,o in db.execute('SELECT (at/3600)*3600,SUM(input),SUM(output) FROM public_network_minutes WHERE at>=? GROUP BY 1', (start,))}
             prices = {(h,m):(i,o) for h,m,i,o in db.execute('SELECT hour,model,input,output FROM public_hour_prices WHERE hour>=?', (start,))}
@@ -114,7 +152,8 @@ class ProviderPages:
                     inp = out*ratio if ratio is not None else None
                     value = (inp*price[0]+out*price[1])/1e6 if inp is not None and price else None
                     rows.append(dict(computer=labels[n],hour=h,model=m,output=out,estimated_input=inp,estimated_usd=value))
-        return dict(rows=rows, computers=labels, last_sample_at=latest, start=start, now=now)
+        return dict(rows=rows, computers=labels, last_sample_at=latest, start=start, now=now,
+                    page_title='Provider · public estimates' if slug not in self.pages else 'My fleet · public estimates')
 
 
 def load_pages(value):

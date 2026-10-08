@@ -55,3 +55,35 @@ class ProviderEstimateTests(unittest.TestCase):
         self.capture(3660,1100)
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT SUM(input) FROM public_network_minutes').fetchone()[0],1000)
+
+    def test_all_provider_discovery_history_and_private_slug_is_not_listed(self):
+        pid='00000000-0000-0000-0000-000000000001'
+        store=ProviderPages(Path(self.tmp.name)/'all.db', {'secret-fleet':[pid]},track_all=True)
+        row={'id':pid,'chip':'Apple M5 Max','tokens_generated':1000,'current_model':'m','memory_gb':64,'status':'online'}
+        store.capture({'providers':[row]},self.prices,3600)
+        row['tokens_generated']=1100
+        store.capture({'providers':[row]},self.prices,3660)
+        self.assertEqual(store.ids_for(pid),[pid])
+        self.assertEqual(store.read(pid,3660)['rows'][0]['output'],100)
+        directory=store.directory('M5')
+        self.assertEqual(directory['total'],1)
+        self.assertNotIn('secret-fleet',str(directory))
+        self.assertEqual(directory['rows'][0]['ram'],64)
+        store.capture({'providers':[]},self.prices,3720)
+        self.assertEqual(store.ids_for(pid),[pid])
+        with self.assertRaises(KeyError):store.ids_for('00000000-0000-0000-0000-000000000002')
+
+    def test_directory_paging_and_literal_search(self):
+        store=ProviderPages(Path(self.tmp.name)/'many.db',{},track_all=True)
+        providers=[{'id':f'00000000-0000-0000-0000-{n:012d}','chip':'chip','tokens_generated':0} for n in range(105)]
+        store.capture({'providers':providers},{},3600)
+        self.assertEqual(store.directory()['total'],105)
+        self.assertEqual(len(store.directory()['rows']),100)
+        self.assertEqual(len(store.directory(offset=100)['rows']),5)
+        self.assertEqual(store.directory('%')['total'],0)
+
+    def test_missing_counter_creates_no_invented_tokens(self):
+        self.capture(3600,1000)
+        self.store.capture({'providers':[{'id':'p','chip':'chip'}]},self.prices,3660)
+        self.capture(3720,2000)
+        self.assertEqual(self.store.read('fleet',3720)['rows'],[])

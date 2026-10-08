@@ -23,6 +23,31 @@ class ScoreFeedTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.store = score_feed.ScoreStore(Path(self.directory.name) / "scores.sqlite3")
 
+    def test_public_directory_routes_cache_and_private_slug_separation(self):
+        with patch.dict('os.environ', {'TRACK_ALL_PUBLIC_PROVIDERS':'1','PROVIDER_PAGES_JSON':'{}'}):
+            service=score_feed.ScoreService(self.store)
+        pid='00000000-0000-0000-0000-000000000001'
+        service.provider_pages.capture({'providers':[{'id':pid,'chip':'Apple M5','tokens_generated':100}]},{},3600)
+        a=service.read_providers(search='Apple')
+        self.assertEqual(json.loads(a)['total'],1)
+        self.assertIs(a,service.read_providers(search='Apple'))
+        for n in range(70):service.read_providers(search=str(n))
+        self.assertLessEqual(len(service._providers_cache),64)
+        http=score_feed.ThreadingHTTPServer(('127.0.0.1',0),score_feed.ScoreHandler)
+        http.service=service
+        thread=threading.Thread(target=http.serve_forever,daemon=True);thread.start()
+        try:
+            base='http://127.0.0.1:'+str(http.server_address[1])
+            for path in ['/providers','/providers/','/providers/'+pid,'/provider-charts.js']:
+                with urlopen(base+path) as response:self.assertEqual(response.status,200)
+            with urlopen(base+'/api/providers/'+pid) as response:
+                self.assertIn('noindex',response.headers['X-Robots-Tag'])
+                self.assertEqual(json.load(response)['computers'],['Apple M5'])
+            with self.assertRaises(HTTPError) as error:urlopen(base+'/providers/secret-fleet')
+            self.assertEqual(error.exception.code,404)
+        finally:
+            http.shutdown();http.server_close();thread.join()
+
     def test_public_capacity_adapter_uses_one_request_and_retains_availability(self) -> None:
         payload = {"models": [{"id": "model", "warm_providers": 10, "active_requests": 17, "cold_providers": 4}, None]}
         with patch.object(score_feed, "get_json", return_value=payload) as fetch:

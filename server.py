@@ -414,8 +414,24 @@ class ScoreService:
         self._scores_cache: OrderedDict[tuple[int, int], tuple[float, bytes, bool]] = OrderedDict()
         config_path = os.environ.get("PROVIDER_PAGES_FILE")
         config = Path(config_path).read_text() if config_path else os.environ.get("PROVIDER_PAGES_JSON", "{}")
-        self.provider_pages = ProviderPages(store.path, load_pages(config))
+        self.provider_pages = ProviderPages(store.path, load_pages(config), os.environ.get('TRACK_ALL_PUBLIC_PROVIDERS')=='1')
         self.provider_error = None
+        self._providers_lock = threading.Lock()
+        self._providers_cache = OrderedDict()
+
+    def read_providers(self, slug=None, search='', offset=0):
+        key=(slug,search,offset)
+        with self._providers_lock:
+            cached=self._providers_cache.get(key)
+            if cached is None or time.monotonic()>=cached[0]:
+                payload=self.provider_pages.read(slug,int(time.time())) if slug else self.provider_pages.directory(search,offset)
+                payload['warning']=self.provider_error
+                cached=(time.monotonic()+30,json.dumps(payload,separators=(',',':'),allow_nan=False).encode())
+                self._providers_cache[key]=cached
+            self._providers_cache.move_to_end(key)
+            while len(self._providers_cache)>64:
+                self._providers_cache.popitem(last=False)
+            return cached[1]
 
     def read_scores(self, window: int, average: int = DEFAULT_AVERAGE_SECONDS) -> tuple[bytes, int]:
         if window not in WINDOW_BUCKETS:
@@ -460,7 +476,7 @@ class ScoreService:
                     self.last_error = str(error)
                     self._scores_cache.clear()
                 print(f"Score capture failed: {error}", flush=True)
-            if self.provider_pages.pages:
+            if self.provider_pages.enabled:
                 try:
                     now = int(time.time())
                     payload = get_json(f"{DEFAULT_BASE_URL.rstrip('/')}/api/stats")
@@ -469,8 +485,12 @@ class ScoreService:
                         prices = {}  # Do not price new hours with stale rates.
                     self.provider_pages.capture(payload, prices, now)
                     self.provider_error = self.prices.last_error
+                    with self._providers_lock:
+                        self._providers_cache.clear()
                 except (RuntimeError, OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
                     self.provider_error = "Public provider collection unavailable"
+                    with self._providers_lock:
+                        self._providers_cache.clear()
                     print("Public provider capture failed", flush=True)
             try:
                 self.store.prune(int(time.time()))
@@ -488,15 +508,31 @@ class ScoreHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in ('/providers','/providers/','/api/providers') and self.server.service.provider_pages.track_all:
+            if parsed.path!='/api/providers':
+                self.send_bytes(WEB_PATH.with_name('provider-directory.html').read_bytes(),'text/html; charset=utf-8')
+            else:
+                try:
+                    query=parse_qs(parsed.query)
+                    search=query.get('search',[''])[0][:64]
+                    offset=max(0,min(1000000,int(query.get('offset',['0'])[0])))
+                    body=self.server.service.read_providers(search=search,offset=offset)
+                    self.send_bytes(body,'application/json; charset=utf-8')
+                except (ValueError,sqlite3.Error):
+                    self.send_json({'error':'Invalid request'},HTTPStatus.BAD_REQUEST)
+            return
         if parsed.path.startswith(("/providers/", "/api/providers/")):
             slug = parsed.path.rsplit("/", 1)[-1]
             pages = self.server.service.provider_pages
-            if slug not in pages.pages:
+            try:
+                if parsed.path not in ('/providers/'+slug,'/api/providers/'+slug):
+                    raise KeyError('Unknown provider page')
+                pages.ids_for(slug)
+            except KeyError:
                 self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
-            elif parsed.path.startswith("/api/"):
-                payload = pages.read(slug, int(time.time()))
-                payload["warning"] = self.server.service.provider_error
-                self.send_json(payload)
+                return
+            if parsed.path.startswith("/api/"):
+                self.send_bytes(self.server.service.read_providers(slug),'application/json; charset=utf-8')
             else:
                 self.send_bytes(WEB_PATH.with_name("providers.html").read_bytes(), "text/html; charset=utf-8")
             return
@@ -541,7 +577,7 @@ class ScoreHandler(BaseHTTPRequestHandler):
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        if urlparse(self.path).path.startswith(("/providers/", "/api/providers/")):
+        if urlparse(self.path).path in ('/providers','/api/providers') or urlparse(self.path).path.startswith(("/providers/", "/api/providers/")):
             self.send_header("X-Robots-Tag", "noindex, nofollow, noarchive")
         if content_type.startswith("text/html"):
             # Allow Cloudflare's beacon host, including versioned script paths.

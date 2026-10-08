@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0 — 2026-10-08
+
+- Optional all-public-provider collection from one shared minute stats pull,
+  with on-demand hourly charts at /providers/<provider-id>.
+- Add a paginated searchable /providers directory using public chip/RAM/status
+  metadata. Never enumerate configured private fleet slugs or memberships.
+- Cache serialized directory/page responses for 30 seconds in a bounded LRU;
+  invalidate on collection and errors. Keep provider responses no-store at edge.
+- Add indexed retention queries and preserve existing provider and score history.
+
 ## 0.3.1 — 2026-10-08
 
 - Show two stacked hourly estimate charts: by model and by chip-name computer.
