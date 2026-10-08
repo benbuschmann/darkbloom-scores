@@ -564,6 +564,24 @@ class ScoreHandler(BaseHTTPRequestHandler):
         self.send_bytes(body, "application/json; charset=utf-8", cache_control=cache_control)
 
     def do_POST(self) -> None:
+        if urlparse(self.path).path == '/api/fleets' and self.server.service.provider_pages.track_all:
+            self.close_connection = True
+            try:
+                origin=self.headers.get('Origin')
+                if origin and urlparse(origin).netloc != self.headers.get('Host'):
+                    raise ValueError('Use the fleet form on this website.')
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0 < length <= 8192 or self.headers.get('Transfer-Encoding') or self.headers.get('Content-Type','').split(';')[0] != 'application/json':
+                    raise ValueError('Invalid fleet request.')
+                data=json.loads(self.rfile.read(length))
+                if not isinstance(data,dict) or set(data) != {'keys'}:
+                    raise ValueError('Only a list of public keys is accepted.')
+                self.send_json(self.server.service.provider_pages.create_fleet(data['keys']),HTTPStatus.CREATED)
+            except (ValueError,UnicodeDecodeError):
+                self.send_json({'error':'Enter 1–26 complete SE public keys, one per line. If the creation limit was reached, try again later.'},HTTPStatus.BAD_REQUEST)
+            except sqlite3.Error:
+                self.send_json({'error':'Fleet could not be saved. Please try again.'},HTTPStatus.SERVICE_UNAVAILABLE)
+            return
         # Old browser tabs may still send heartbeats after an upgrade.
         # Reject without reading, attributing, logging, or storing the body.
         self.close_connection = True

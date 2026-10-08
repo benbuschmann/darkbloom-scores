@@ -217,6 +217,15 @@ API.
 Independent community project. [MIT license](LICENSE).
 # Optional public provider estimate pages
 
+The `/providers` directory includes **Create your fleet**: paste 1–26 complete
+SE public keys, one per line, to save an unlisted random fleet URL. Duplicate keys
+are combined; membership persists in SQLite across deploys and connections are
+resolved through the public attestation feed. Unobserved keys wait for public
+data. No account JSON, account identifiers, credentials or visitor IPs are stored.
+Fleet membership is user-selected, not proof of ownership. Anyone with the link
+can view it; it is not authenticated. Creation is bounded to 20 fleets per minute
+globally and 10,000 saved fleets, with request-size and same-origin checks.
+
 Set `TRACK_ALL_PUBLIC_PROVIDERS=1` to record every public provider from the same
 shared minute stats pull. `/providers` is a paginated directory searchable by
 SE public key, chip or model; `/providers/se-<key-fingerprint>` combines observed

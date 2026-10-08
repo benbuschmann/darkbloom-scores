@@ -106,3 +106,23 @@ class ProviderEstimateTests(unittest.TestCase):
         self.store.capture({'providers':[{'id':'p','chip':'chip'}]},self.prices,3660)
         self.capture(3720,2000)
         self.assertEqual(self.store.read('fleet',3720)['rows'],[])
+
+    def test_created_key_fleet_persists_and_follows_sessions(self):
+        path=Path(self.tmp.name)/'created.db'
+        store=ProviderPages(path,{},track_all=True)
+        key=base64.b64encode(bytes(range(64))).decode()
+        created=store.create_fleet([key,key])
+        self.assertEqual(created['computers'],1)
+        slug=created['url'].split('/')[-1]
+        self.assertEqual(store.read(slug,3600)['rows'],[])
+        for n,pid in enumerate(['00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002']):
+            store.capture_keys({'providers':[{'provider_id':pid,'se_public_key':key}]})
+            for t,tokens in [(3600+n*120,100),(3660+n*120,150)]:
+                store.capture({'providers':[{'id':pid,'chip':'Apple M5','tokens_generated':tokens,'current_model':'m'}]},self.prices,t)
+        reopened=ProviderPages(path,{},track_all=True)
+        result=reopened.read(slug,3900)
+        self.assertEqual(result['computers'],['Apple M5'])
+        self.assertEqual(sum(r['output'] for r in result['rows']),100)
+        self.assertNotIn(slug,str(store.directory()))
+        for bad in [[],[key]*27,['machine-id'],['! '*44],[123]]:
+            with self.assertRaises(ValueError):store.create_fleet(bad)

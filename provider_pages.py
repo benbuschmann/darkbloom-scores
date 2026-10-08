@@ -5,6 +5,8 @@ import os
 import re
 import base64
 import hashlib
+import secrets
+import time
 from contextlib import contextmanager, closing
 from pathlib import Path
 
@@ -57,7 +59,38 @@ class ProviderPages:
                 CREATE TABLE IF NOT EXISTS public_provider_keys (
                     provider TEXT PRIMARY KEY, public_key TEXT NOT NULL, fingerprint TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS public_provider_keys_fingerprint ON public_provider_keys(fingerprint);
+                CREATE TABLE IF NOT EXISTS public_key_fleets (
+                    slug TEXT PRIMARY KEY, keys_json TEXT NOT NULL, created_at INTEGER NOT NULL);
             ''')
+
+    def create_fleet(self, keys):
+        if not isinstance(keys,list) or not 1 <= len(keys) <= 26:
+            raise ValueError('Paste 1–26 SE public keys, one per line.')
+        canonical=[]
+        for key in keys:
+            if not isinstance(key,str) or len(key.strip()) != 88:
+                raise ValueError('Each entry must be a complete SE public key, not a provider or machine ID.')
+            try:
+                raw=base64.b64decode(key.strip(),validate=True)
+            except ValueError:
+                raise ValueError('Invalid public key format.') from None
+            if len(raw)!=64:
+                raise ValueError('Invalid public key length.')
+            canonical.append(base64.b64encode(raw).decode())
+        canonical=list(dict.fromkeys(canonical))
+        now=int(time.time())
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT COUNT(*) FROM public_key_fleets WHERE created_at>?',(now-60,)).fetchone()[0]>=20 or db.execute('SELECT COUNT(*) FROM public_key_fleets').fetchone()[0]>=10000:
+                raise ValueError('Fleet creation limit reached. Please try again later.')
+            slug='fleet-'+secrets.token_hex(16)
+            db.execute('INSERT INTO public_key_fleets VALUES(?,?,?)',(slug,json.dumps(canonical),now))
+        return dict(url='/providers/'+slug,computers=len(canonical))
+
+    def fleet_keys(self, slug):
+        with self.connect() as db:
+            row=db.execute('SELECT keys_json FROM public_key_fleets WHERE slug=?',(slug,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def capture_keys(self, payload):
         with self.connect() as db:
@@ -77,6 +110,11 @@ class ProviderPages:
     def ids_for(self, slug):
         if slug in self.pages:
             return self.pages[slug]
+        if self.track_all and re.fullmatch(r'fleet-[a-f0-9]{32}',slug):
+            keys=self.fleet_keys(slug)
+            if keys is not None:
+                with self.connect() as db:
+                    return [p[0] for key in keys for p in db.execute('SELECT provider FROM public_provider_keys WHERE public_key=? ORDER BY provider',(key,))]
         if self.track_all and re.fullmatch(r'se-[a-f0-9]{64}', slug):
             with self.connect() as db:
                 ids = [r[0] for r in db.execute('SELECT provider FROM public_provider_keys WHERE fingerprint=? ORDER BY provider', (slug[3:],))]
@@ -164,6 +202,7 @@ class ProviderPages:
 
     def read(self, slug, now):
         ids = self.ids_for(slug)
+        fleet_keys=self.fleet_keys(slug)
         start = (now-23*3600)//3600*3600
         rows = []
         with self.connect() as db:
@@ -174,9 +213,19 @@ class ProviderPages:
                 # Reconnected sessions of one public key remain one computer.
                 latest_id = max(ids, key=lambda pid:(db.execute('SELECT at FROM public_provider_samples WHERE provider=?',(pid,)).fetchone() or [0])[0])
                 labels = [chips.get(latest_id) or 'Computer'] * len(ids)
+            if fleet_keys is not None:
+                key_names=[]
+                key_ids=[]
+                for key in fleet_keys:
+                    members=[r[0] for r in db.execute('SELECT k.provider FROM public_provider_keys k LEFT JOIN public_provider_samples s ON s.provider=k.provider WHERE k.public_key=? ORDER BY s.at DESC,k.provider',(key,))]
+                    key_ids.append(members)
+                    key_names.append(next((chips[p] for p in members if chips.get(p)), 'Computer · awaiting public observation'))
+                key_labels=[f'{name} · {1+key_names[:n].count(name)}' if key_names.count(name)>1 else name for n,name in enumerate(key_names)]
+                name_by_id={pid:key_labels[n] for n,members in enumerate(key_ids) for pid in members}
+                labels=[name_by_id[pid] for pid in ids]
             ratios = {h: (i/o if o else None) for h,i,o in db.execute('SELECT (at/3600)*3600,SUM(input),SUM(output) FROM public_network_minutes WHERE at>=? GROUP BY 1', (start,))}
             prices = {(h,m):(i,o) for h,m,i,o in db.execute('SELECT hour,model,input,output FROM public_hour_prices WHERE hour>=?', (start,))}
-            latest = max((db.execute('SELECT at FROM public_provider_samples WHERE provider=?',(pid,)).fetchone() or [0])[0] for pid in ids) or None
+            latest = max(((db.execute('SELECT at FROM public_provider_samples WHERE provider=?',(pid,)).fetchone() or [0])[0] for pid in ids),default=0) or None
             for n,pid in enumerate(ids):
                 for h,m,out in db.execute('SELECT hour,model,output FROM public_provider_usage WHERE provider=? AND hour>=?', (pid,start)):
                     ratio = ratios.get(h)
@@ -184,8 +233,8 @@ class ProviderPages:
                     inp = out*ratio if ratio is not None else None
                     value = (inp*price[0]+out*price[1])/1e6 if inp is not None and price else None
                     rows.append(dict(computer=labels[n],hour=h,model=m,output=out,estimated_input=inp,estimated_usd=value))
-        return dict(rows=rows, computers=list(dict.fromkeys(labels)), last_sample_at=latest, start=start, now=now,
-                    page_title='Provider · public estimates' if slug not in self.pages else 'My fleet · public estimates')
+        return dict(rows=rows, computers=key_labels if fleet_keys is not None else list(dict.fromkeys(labels)), last_sample_at=latest, start=start, now=now,
+                    page_title='My fleet · public estimates' if slug in self.pages or fleet_keys is not None else 'Provider · public estimates')
 
 
 def load_pages(value):

@@ -45,6 +45,21 @@ class ScoreFeedTests(unittest.TestCase):
             with urlopen(base+'/api/providers/'+pid) as response:
                 self.assertIn('noindex',response.headers['X-Robots-Tag'])
                 self.assertEqual(json.load(response)['computers'],['Apple M5'])
+            from urllib.request import Request
+            key=base64.b64encode(bytes(64)).decode()
+            request=Request(base+'/api/fleets',data=json.dumps({'keys':[key,key]}).encode(),headers={'Content-Type':'application/json','Origin':base})
+            with urlopen(request) as response:
+                self.assertEqual(response.status,201)
+                created=json.load(response)
+            self.assertEqual(created['computers'],1)
+            with urlopen(base+'/api'+created['url']) as response:
+                self.assertEqual(json.load(response)['computers'],['Apple M5'])
+            invalid=Request(base+'/api/fleets',data=b'{"keys":["wrong"]}',headers={'Content-Type':'application/json'})
+            with self.assertRaises(HTTPError) as error:urlopen(invalid)
+            self.assertEqual(error.exception.code,400)
+            foreign=Request(base+'/api/fleets',data=json.dumps({'keys':[key]}).encode(),headers={'Content-Type':'application/json','Origin':'https://other.example'})
+            with self.assertRaises(HTTPError) as error:urlopen(foreign)
+            self.assertEqual(error.exception.code,400)
             with self.assertRaises(HTTPError) as error:urlopen(base+'/providers/secret-fleet')
             self.assertEqual(error.exception.code,404)
         finally:

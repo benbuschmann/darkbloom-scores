@@ -5,6 +5,23 @@ body{margin:0;background:#0c1117;color:#e2e8f0;font:16px system-ui}main{max-widt
 const guide=document.createElement('section');
 guide.innerHTML="<h2 id=\"find-provider\">How to find your SE public key</h2><p>On each Mac running Darkbloom, open Terminal and run:</p><pre style=\"overflow:auto\"><code>python3 -c 'import json,pathlib; print(json.loads((pathlib.Path.home()/\".darkbloom/daemon-state.json\").read_text()).get(\"attestation_public_key\") or \"No public key available\")'</code></pre><p>Copy the public key into the <a href=\"/providers\">public directory</a> search box. No login or API key is needed. The key follows reconnects; a replacement key starts a separate identity.</p>";
 document.querySelector('main h1').after(guide);
+const fleetForm=document.createElement('section');
+fleetForm.style.cssText='padding:20px;background:#161d25;border:1px solid #43505f;border-radius:12px;margin:24px 0';
+fleetForm.innerHTML='<h2>Create your fleet</h2><label for="fleet-keys">SE public keys · one per line</label><p><textarea id="fleet-keys" rows="5" maxlength="8192" placeholder="Paste each computer’s complete SE public key here" style="box-sizing:border-box;width:100%;padding:12px;background:#0c1117;color:inherit;border:1px solid #43505f;border-radius:8px;font:14px monospace"></textarea></p><p>Up to 26 computers. Duplicate keys are combined. Only these public keys are saved—no login or account data. This is a user-selected group, not verified ownership. Anyone with the unlisted link can view the fleet.</p><button id="create-fleet" type="button">Create fleet link</button><p id="fleet-result" role="status" aria-live="polite"></p>';
+guide.after(fleetForm);
+document.querySelector('#create-fleet').onclick=async()=>{
+ const button=document.querySelector('#create-fleet'),result=document.querySelector('#fleet-result');
+ const keys=document.querySelector('#fleet-keys').value.trim().split(/[\s,]+/).filter(Boolean);
+ if(!keys.length||keys.length>26){result.textContent='Paste 1–26 public keys, one per line.';return;}
+ button.disabled=true;result.textContent='Saving your fleet…';
+ try{
+  const response=await fetch('/api/fleets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys})});
+  const data=await response.json();if(!response.ok)throw Error(data.error||'Could not create fleet.');
+  if(!/^\/providers\/fleet-[a-f0-9]{32}$/.test(data.url))throw Error('Invalid fleet response.');
+  result.textContent=data.computers+' computer(s) saved. Bookmark this link: ';
+  const link=document.createElement('a');link.href=data.url;link.textContent=location.origin+data.url;link.style.overflowWrap='anywhere';result.append(link);
+ }catch(error){result.textContent=error.message||'Could not save fleet. Please try again.';}finally{button.disabled=false;}
+};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let offset=0,seq=0,timer;
 async function load(){const request=++seq;try{
