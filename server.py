@@ -538,6 +538,8 @@ class ScoreHandler(BaseHTTPRequestHandler):
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        if urlparse(self.path).path.startswith(("/providers/", "/api/providers/")):
+            self.send_header("X-Robots-Tag", "noindex, nofollow, noarchive")
         if content_type.startswith("text/html"):
             # Allow Cloudflare's beacon host, including versioned script paths.
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'")

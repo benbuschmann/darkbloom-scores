@@ -8,6 +8,8 @@
   Exclude unknown base rewards; label estimates, partial history, and gaps.
 - Keep provider identity configuration outside Git, use no account credentials,
   and preserve existing score history, caching, and Cloudflare analytics.
+- Keep provider pages unlisted with no navigation to or from score charts,
+  and send no-index/no-follow directives. Unlisted URLs are not authentication.
 
 ## 0.2.1 — 2026-09-16
 

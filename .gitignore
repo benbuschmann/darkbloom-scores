@@ -12,5 +12,7 @@ backups/
 *.csv
 *.log
 .DS_Store
+# Local publication helper may contain a pasted GitHub token. Never publish it.
+publish_with_token.local.py
 # Exact upstream source is verified and installed at build/setup time.
 warm_model_manager.py

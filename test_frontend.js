@@ -25,6 +25,15 @@ test('release version matches Docker metadata', () => {
   assert.ok(dockerfile.includes(`org.opencontainers.image.version="${version}"`));
 });
 
+test('provider page is unlisted, non-indexable, and has no scores navigation', () => {
+  const provider = fs.readFileSync(path.join(__dirname,'providers.html'),'utf8');
+  const html = fs.readFileSync(path.join(__dirname,'index.html'),'utf8');
+  assert.match(provider, /name="robots" content="noindex, nofollow, noarchive"/);
+  assert.doesNotMatch(provider, /href="\/"/);
+  assert.doesNotMatch(html, /href="\/providers\//);
+  new Function(provider.match(/<script>([\s\S]*?)<\/script>/)[1]);
+});
+
 test('requests above capacity are not capped, and missing/zero load is undefined', () => {
   assert.equal(charts.ratio(162, 100), 162);
   assert.equal(charts.ratio(0, 100), 0);

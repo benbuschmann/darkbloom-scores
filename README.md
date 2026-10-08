@@ -224,7 +224,10 @@ The page is `/providers/<slug>`; only configured slugs are enabled.
 
 For the owner's local configuration, run with
 `PROVIDER_PAGES_FILE=data/provider-pages.json python3 server.py serve` and visit
-`http://127.0.0.1:8788/providers/my-fleet`.
+`http://127.0.0.1:8788/providers/<configured-slug>`. Use a long random slug for
+an unlisted page. There are no navigation links to or from the score charts,
+and pages send no-index directives. This is not authentication: anyone who
+knows the URL can view and share it.
 For Dokploy, configure the JSON environment variable on the application and
 redeploy with the existing persistent `/data` volume. Configuration is not
 shipped inside the image. Do not upload account responses or credentials.
