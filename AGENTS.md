@@ -33,5 +33,9 @@ manager and not the owner's private local tracker.
   container port 8788, HTTPS, Cloudflare analytics, score-retention checks.
 - Keep repo publication separate from deployment. Do not claim the site is
   hosted until its public URL, live collection, and persistence are verified.
+- Provider estimates use complete network half-hour buckets and direct stats
+  source timestamps. Public requests are observed counters, not verified paid jobs.
+  `models` is an advertised catalog, not a loaded-model list. Base rewards are
+  public-eligibility scenarios only; do not claim private eligibility or pool slots.
 - Preserve real data volumes during redeployment. Use consistent SQLite
   backups and never expose them through the public HTTP server.

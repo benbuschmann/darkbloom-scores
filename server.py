@@ -390,11 +390,13 @@ class PriceCache:
         self.fallback = ModelPrice(None, None)
         self.next_refresh = 0
         self.last_error: str | None = None
+        self.fetched_at: int | None = None
 
     def read(self, now: int) -> tuple[dict[str, ModelPrice], ModelPrice]:
         if now >= self.next_refresh:
             try:
                 self.prices, self.fallback = fetch_model_prices(DEFAULT_PRICING_URL)
+                self.fetched_at = now
                 self.next_refresh = now + 15 * 60
                 self.last_error = None
             except (RuntimeError, OSError, ValueError) as error:
@@ -479,13 +481,41 @@ class ScoreService:
             if self.provider_pages.enabled:
                 try:
                     now = int(time.time())
-                    payload = get_json(f"{DEFAULT_BASE_URL.rstrip('/')}/api/stats")
-                    self.provider_pages.capture_keys(get_json('https://api.darkbloom.dev/v1/providers/attestation'))
+                    attestation=get_json('https://api.darkbloom.dev/v1/providers/attestation')
+                    self.provider_pages.capture_keys(attestation)
+                    payload = get_json('https://api.darkbloom.dev/v1/stats')
+                    from provider_pages import timestamp
+                    sample_at=timestamp(payload['snapshot_at'])
+                    if not 0 <= int(time.time())-sample_at <= 150:
+                        raise ValueError('Public stats snapshot is stale or in the future')
+                    with self.provider_pages.connect() as db:
+                        mapped={r[0] for r in db.execute('SELECT provider FROM public_provider_keys')}
+                    if any(isinstance(row,dict) and row.get('id') not in mapped for row in payload.get('providers',[])):
+                        # A session may connect between the two feed snapshots.
+                        # One bounded retry before capture; never guess identity.
+                        try:
+                            retry=get_json('https://api.darkbloom.dev/v1/providers/attestation')
+                            self.provider_pages.capture_keys(retry)
+                            attestation=retry
+                        except (RuntimeError,OSError,ValueError):
+                            pass  # Retain public deltas; a later verified mapping can join them.
                     prices, _ = self.prices.read(now)
                     if self.prices.last_error:
                         prices = {}  # Do not price new hours with stale rates.
-                    self.provider_pages.capture(payload, prices, now)
-                    self.provider_error = self.prices.last_error
+                    self.provider_pages.capture(payload, prices, now,attestation,self.prices.fetched_at)
+                    # Network failures must not discard otherwise valid provider
+                    # counter observations. Missing ratios/calibration stay unknown.
+                    network_error=None
+                    try:
+                        series=get_json('https://api.darkbloom.dev/v1/network/series?window=24h')
+                        try:
+                            totals=get_json('https://api.darkbloom.dev/v1/network/totals?window=24h')
+                        except (RuntimeError,OSError,ValueError) as error:
+                            totals={};network_error='Network payout calibration unavailable'
+                        self.provider_pages.capture_network(series,totals,payload,int(time.time()))
+                    except (RuntimeError,OSError,sqlite3.Error,ValueError,KeyError) as error:
+                        network_error='Network estimate inputs unavailable: '+str(error)
+                    self.provider_error = self.prices.last_error or network_error
                     with self._providers_lock:
                         self._providers_cache.clear()
                 except (RuntimeError, OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:

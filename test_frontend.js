@@ -36,7 +36,7 @@ test('moving-average labels are independent of display windows', () => {
 
 test('release version matches Docker metadata', () => {
   const version = fs.readFileSync(path.join(__dirname,'VERSION'),'utf8').trim();
-  assert.equal(version,'0.4.0');
+  assert.equal(version,'0.5.0');
   const dockerfile = fs.readFileSync(path.join(__dirname,'Dockerfile'),'utf8');
   assert.ok(dockerfile.includes(`org.opencontainers.image.version="${version}"`));
 });
@@ -68,6 +68,20 @@ test('model and computer hourly stacks have equal totals and preserve missing ho
   assert.equal(models[1].unpriced,40);
   assert.equal(models[2].observed,false);
   assert.ok(!provider.legend(['<script>']).includes('<script>'));
+});
+
+test('hourly public proxies preserve unknown values and observed request counts', () => {
+  const provider=require('./provider-charts.js');
+  const rows=[{hour:3600,model:'m',computer:'A',output:10,requests:2,estimated_usd:.1,metric_high:.2,calibrated_usd:.1,ratio_usd:.2,ratio_high_usd:.3,output_floor_usd:.01,output_ceiling_usd:.02},
+              {hour:3600,model:'m',computer:'B',output:20,requests:null,estimated_usd:null,calibrated_usd:null}];
+  const hour=provider.buckets(rows,['m'],'model',3600)[0];
+  assert.equal(hour.requests,null);assert.equal(hour.estimates.calibrated_usd,null);assert.equal(hour.total,.1);assert.equal(hour.unpriced,20);
+  assert.equal(hour.range_high,.2);assert.equal(hour.complete,false);
+  const html=fs.readFileSync(path.join(__dirname,'providers.html'),'utf8');
+  assert.match(html,/Per-computer input tokens are not observable/);
+  assert.match(html,/observed requests|Observed requests/);
+  assert.match(html,/Base · up to/);
+  assert.match(html,/Shared catalog/);
 });
 
 test('requests above capacity are not capped, and missing/zero load is undefined', () => {

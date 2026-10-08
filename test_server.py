@@ -23,6 +23,27 @@ class ScoreFeedTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.store = score_feed.ScoreStore(Path(self.directory.name) / "scores.sqlite3")
 
+    def test_provider_poll_order_timestamp_and_network_failure_isolation(self):
+        with patch.dict('os.environ',{'TRACK_ALL_PUBLIC_PROVIDERS':'1','PROVIDER_PAGES_JSON':'{}'}):service=score_feed.ScoreService(self.store)
+        pid='00000000-0000-0000-0000-000000000001'
+        import base64
+        calls=[]
+        def public_get(url):
+            calls.append(url)
+            if url.endswith('/attestation'):return {'providers':[{'provider_id':pid,'se_public_key':base64.b64encode(bytes(64)).decode()}]}
+            if url.endswith('/v1/stats'):return {'snapshot_at':'1970-01-01T02:00:00Z','providers':[{'id':pid,'tokens_generated':150,'requests_served':12,'current_model':'m'}]}
+            raise RuntimeError('network series unavailable')
+        service.provider_pages.capture({'providers':[{'id':pid,'tokens_generated':100,'requests_served':10,'current_model':'m'}]}, {},7140)
+        stop=threading.Event()
+        with patch.object(service,'capture',return_value=0),patch.object(service.prices,'read',return_value=({},ModelPrice(None,None))),patch.object(score_feed,'get_json',side_effect=public_get),patch.object(score_feed.time,'time',return_value=7201),patch.object(stop,'wait',side_effect=lambda _:stop.set()):
+            service.loop(60,stop)
+        self.assertEqual(calls[:2],['https://api.darkbloom.dev/v1/providers/attestation','https://api.darkbloom.dev/v1/stats'])
+        page=service.provider_pages.read(pid,7250)
+        self.assertEqual(sum(r['output'] for r in page['rows']),50)
+        self.assertEqual(sum(r['requests'] for r in page['rows']),2)
+        self.assertEqual(page['last_sample_at'],7200)
+        self.assertIn('Network estimate inputs unavailable',service.provider_error)
+
     def test_public_directory_routes_cache_and_private_slug_separation(self):
         with patch.dict('os.environ', {'TRACK_ALL_PUBLIC_PROVIDERS':'1','PROVIDER_PAGES_JSON':'{}'}):
             service=score_feed.ScoreService(self.store)

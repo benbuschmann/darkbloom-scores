@@ -261,14 +261,91 @@ For Dokploy, configure the JSON environment variable on the application and
 redeploy with the existing persistent `/data` volume. Configuration is not
 shipped inside the image. Do not upload account responses or credentials.
 
-Public stats are collected once per minute. Output counter deltas are stored
-by provider/model/hour; lifetime counters are never treated as recent usage.
-Each hour's estimated input equals observed output × network prompt/completion
-ratio, updated as public minute samples become available. API token value uses
-the latest publicly observed price in that hour. This is not an actual payout:
-base rewards, cached-input discounts and provider payment adjustments are unknown.
-Gaps over 150 seconds, resets and initial baselines produce no invented tokens.
-Model-switch deltas retain their output counts but remain unpriced.
+### v0.5.0 — public estimates and accounting guardrails
+
+Provider collection uses `https://api.darkbloom.dev/v1/stats` directly and its
+`snapshot_at`, never the console cache or local poll time for counter boundaries.
+Attestation is fetched and mapped **before** stats each cycle, with one bounded
+retry before capture when the stats snapshot contains unmapped connections.
+Unmapped usage is still saved internally; later verified mappings can join it.
+Duplicate or
+out-of-order snapshots cannot move counter baselines. The directory still uses
+the same no-store edge policy and bounded server-side cache.
+
+`tokens_generated` and `requests_served` deltas are retained per connection/hour/
+catalog. Requests are **observed counter increases, not exact paid jobs**;
+cross-hour intervals are allocated proportionally. Negative resets and intervals
+over 150 seconds are excluded. Positive token jumps above 20× a rolling positive
+rate p95 (at least five accepted intervals) are rejected, with a bootstrap and
+absolute ceiling of 10,000 tokens/second. Requests also have a 1,000/second cap.
+A zero-baseline session restoring at least another session's last lifetime count
+for the same public key is excluded. These conservative heuristics can reject
+real bursts; they do not prove a reset. Rejected observations become baselines
+without being counted as work. Only 32 positive rates per session are retained.
+
+**Ratio source:** `GET /v1/network/series?window=24h`, validated as aligned,
+closed 1,800-second buckets. An hour gets a ratio only with both buckets and a
+positive output denominator. Sum input / sum output, never average bucket ratios.
+Old `public_network_minutes` data is preserved but no longer ingested or read.
+Historical complete series buckets can populate the last 24h; no provider usage
+is invented. Current-hour ratio estimates deliberately remain unavailable.
+
+**Three alternatives, not a confidence interval:**
+
+- Output-only API-price proxy, excluding unknown input. Not a guaranteed payout floor.
+- Rolling network payout proxy: `work_earnings_micro_usd / 1e6` from
+  `/v1/network/totals?window=24h` divided by `last_24h_completion_tokens` from
+  the direct stats feed. `totals.tokens` includes input and is NOT the denominator.
+  Source timestamps must be within 120 seconds; stale calibration is not captured.
+  Each hourly calibration is the latest observed rolling-24h rate during that hour,
+  not an exact hourly earnings rate. Historical hours without a saved rate stay unknown.
+- Hourly input-ratio API-price proxy. Per-machine input is publicly unobservable.
+
+The chart picker defaults to the network payout proxy. All alternatives are in
+the breakdown/tooltip. Missing estimates stay unknown, rather than zero. The
+public `models` array is an **advertised catalog, not loaded models**. Stable
+current-model intervals with a multi-model catalog conservatively get a “Shared
+catalog” range over all advertised prices; any missing price makes the range
+unavailable. Genuine current-model changes stay unattributed and unpriced by API
+rates (the network payout proxy is still available). These are not per-model
+measured token allocations. Public model demand has request counts only.
+
+Coverage is aggregated per computer/hour: unique minute samples /60, longest
+interval, >150s gap counts, resets/jumps, ambiguous-output share, ratio buckets /2,
+and price freshness. A gap is recorded in every overlapping hour. Concurrent
+sessions' minute/eligibility bitmaps are unioned by public key, never summed.
+There are no raw per-poll or per-job records. Legacy request/coverage data stays
+unknown; sparse sampling can undercount and hour-boundary allocation is approximate.
+
+**Base scenario:** the official monthly memory tiers are 24/$10, 32/$12,
+48/$16, 64/$18, 96/$22, 128/$26, 192/$30, 512/$40. UTC calendar-month proration
+and `clamp((uptime-.9)/.1,0,1)` follow the source, applied separately to twelve
+closed 5m blocks using eligible minute samples. Public eligibility requires
+explicit App Attest authorization, online/serving statuses, reported OS ≥27 and
+a current model. Missing minute samples fail closed. Results are “up to” scenarios
+for ALL tiers, not confirmed rewards or guaranteed ceilings: private health,
+ownership/binding, OS-bound authorization, pool slots, verified-memory limits,
+reduction settings and true second-level session uptime are unavailable. They
+are never mixed into job charts; partial-hour base stays pending.
+
+Reviewed source (2026-10-08):
+[tiers and availability](https://github.com/Layr-Labs/d-inference/blob/master/coordinator/payments/baserewards/floor.go),
+[private eligibility](https://github.com/Layr-Labs/d-inference/blob/master/coordinator/payments/baserewards/machine_candidates.go),
+[calendar proration](https://github.com/Layr-Labs/d-inference/blob/master/coordinator/internal/payments/rewardpolicy/epoch.go).
+
+Migration is additive and makes a verified private online backup at
+`/data/scores.sqlite3.before-provider-quality.backup` before upgrading an existing
+provider schema. Preserve the same volume. Older releases use positional INSERTs
+and are NOT safe to run against the expanded schema; rollback requires restoring
+a consistent backup into a separate recovery volume, not overwriting the live DB.
+Scores and configured/unlisted fleets are preserved. No account credentials are
+added to this application. Leaderboard ownership inference is deliberately not
+implemented; matching jobs alone is not proof of ownership.
+
+The reported 18:14–18:22 UTC orphan was not verified: the private earnings endpoint
+capped results at 1,000 and its history no longer covered that interval. No identities
+were guessed or merged. An exported affected job list plus public mapping evidence
+is required to complete that audit; this is separate from credential-free collection.
 Computer labels use public chip names, numbered for duplicates; registration changes need explicit
 configuration changes, not guesses about physical machine identity.
 Hourly history is retained for 38 days, with no per-request or visitor records.

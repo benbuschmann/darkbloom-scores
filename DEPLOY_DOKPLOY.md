@@ -103,6 +103,21 @@ shorter coverage until new data accumulates. No new environment variable is need
 
 ## Analytics: Cloudflare only
 
+### v0.5.0: public-provider estimate guardrails
+
+Keep one replica, the existing `/data` volume, fleet configuration, and
+`TRACK_ALL_PUBLIC_PROVIDERS=1`. Outbound public feeds now include direct `/v1/stats`,
+attestation, `/v1/network/series?window=24h` and `/v1/network/totals?window=24h`.
+No credentials or new Cloudflare cache rules are needed. Provider API stays no-store.
+An additive migration first creates/verifies `scores.sqlite3.before-provider-quality.backup`.
+Existing counters, usage, public-key fleets and score history are preserved. Old
+minute ratios are ignored, and legacy jobs/coverage remain unknown. New coverage,
+job-counter deltas and calibration start on upgrade; completed series buckets
+can restore ratio coverage for the most recent 24h. Verify two increasing source
+sample timestamps, fleet membership preservation, and `/healthz` version 0.5.0.
+Do not run an older image against the expanded schema (old positional INSERTs);
+recover from a consistent backup on a separate volume if rollback is necessary.
+
 ### v0.4.0: all public providers
 
 Enable `TRACK_ALL_PUBLIC_PROVIDERS=1` while retaining `PROVIDER_PAGES_JSON` and

@@ -8,13 +8,18 @@
       const hour = start+i*3600, observed = rows.filter(r=>r.hour===hour);
       const values = groups.map(g => observed.filter(r=>r[key]===g && r.estimated_usd!=null).reduce((sum,r)=>sum+r.estimated_usd,0));
       return {hour, values, total:values.reduce((sum,v)=>sum+v,0), observed:observed.length>0,
+              range_high:observed.filter(r=>r.estimated_usd!=null).reduce((sum,r)=>sum+(r.metric_high??r.estimated_usd),0),
+              estimate_available:observed.some(r=>r.estimated_usd!=null),
+              complete:observed.length>0 && observed.every(r=>r.estimated_usd!=null),
               unpriced:observed.filter(r=>r.estimated_usd==null).reduce((sum,r)=>sum+r.output,0),
-              output:observed.reduce((sum,r)=>sum+r.output,0)};
+              output:observed.reduce((sum,r)=>sum+r.output,0),
+              requests:observed.length && observed.every(r=>r.requests!=null)?observed.reduce((sum,r)=>sum+r.requests,0):null,
+              estimates:Object.fromEntries(['output_floor_usd','output_ceiling_usd','calibrated_usd','ratio_usd','ratio_high_usd'].map(field=>[field,observed.length && observed.every(r=>r[field]!=null)?observed.reduce((sum,r)=>sum+r[field],0):null]))};
     });
   }
   function render(container, rows, groups, key, start, now) {
     const data = buckets(rows,groups,key,start);
-    const max = Math.max(.001,...data.map(b=>b.total));
+    const max = Math.max(.001,...data.map(b=>Math.max(b.total,b.range_high)));
     const left=15, right=920, bottom=185, top=15, step=(right-left)/24, width=step*.72;
     let svg = `<svg viewBox="0 0 1000 225" role="group" aria-label="Hourly estimated value by ${key}">`;
     for(let i=0;i<=4;i++) {
@@ -27,8 +32,9 @@
       b.values.forEach((v,j)=>{const h=v/max*(bottom-top);y-=h;
         svg+=`<rect x="${left+i*step+step*.14}" y="${y}" width="${width}" height="${h}" rx="2" fill="${colors[j%colors.length]}"/>`;
       });
+      if(b.range_high>b.total){const highY=bottom-b.range_high/max*(bottom-top);svg+=`<rect x="${left+i*step+step*.14}" y="${highY}" width="${width}" height="${y-highY}" fill="#a5b1be22" stroke="#a5b1be" stroke-dasharray="3 3"/>`;}
       const label=new Date(b.hour*1000).toLocaleString([], {weekday:'short',hour:'numeric'});
-      svg+=`<rect class="hour-hit" data-index="${i}" tabindex="0" role="button" aria-label="${esc(label)}: ${b.observed?money(b.total):'No observations'}" x="${left+i*step}" y="${top}" width="${step}" height="${bottom-top}" fill="transparent"/>`;
+      svg+=`<rect class="hour-hit" data-index="${i}" tabindex="0" role="button" aria-label="${esc(label)}: ${b.estimate_available?money(b.total)+(b.complete?'':' partial estimate'):b.observed?'Selected estimate unavailable':'No observations'}" x="${left+i*step}" y="${top}" width="${step}" height="${bottom-top}" fill="transparent"/>`;
       svg+='</g>';
       if(i%4===0)svg+=`<text x="${left+i*step}" y="213" fill="#a5b1be" font-size="12">${esc(new Date(b.hour*1000).toLocaleTimeString([],{hour:'numeric'}))}</text>`;
     });
@@ -37,9 +43,9 @@
     function show(target) {
       const i=Number(target.dataset.index), b=data[i];
       const label=new Date(b.hour*1000).toLocaleString([], {weekday:'short',hour:'numeric'});
-      tip.innerHTML=`<div class="muted">${esc(label)}${b.hour===Math.floor(now/3600)*3600?' · partial hour':''}</div><strong>${b.observed?money(b.total)+' estimated':'No observations'}</strong>`+
-        (b.observed?groups.map((g,j)=>`<div class="tooltip-row"><span><i class="dot" style="background:${colors[j%colors.length]}"></i>${esc(g)}</span><b>${money(b.values[j])}</b></div>`).join('')+`<div class="small">${b.output.toLocaleString()} observed output tokens</div>`:'')+
-        (b.unpriced?`<div class="small">Plus ${b.unpriced.toLocaleString()} unpriced output tokens</div>`:'');
+      tip.innerHTML=`<div class="muted">${esc(label)}${b.hour===Math.floor(now/3600)*3600?' · partial hour':''}</div><strong>${b.estimate_available?money(b.total)+(b.complete?' estimated':' partial estimate'):b.observed?'Selected estimate unavailable':'No observations'}</strong>`+
+        (b.observed?groups.map((g,j)=>`<div class="tooltip-row"><span><i class="dot" style="background:${colors[j%colors.length]}"></i>${esc(g)}</span><b>${money(b.values[j])}</b></div>`).join('')+`<div class="small">${b.output.toLocaleString()} observed output tokens · ${b.requests==null?'unknown':b.requests.toLocaleString()} observed requests</div><div class="small">Output-only API proxy: ${money(b.estimates.output_floor_usd)}–${money(b.estimates.output_ceiling_usd)}</div><div class="small">Network payout proxy: ${money(b.estimates.calibrated_usd)}</div><div class="small">Input-ratio API proxy: ${money(b.estimates.ratio_usd)}–${money(b.estimates.ratio_high_usd)}</div>`:'')+
+        (b.unpriced?`<div class="small">Plus ${b.unpriced.toLocaleString()} output tokens without the selected estimate</div>`:'');
       tip.hidden=false;
       // Anchor inside the chart; clamp so edge hours never overflow the card.
       const desired=(i+.5)/24*container.clientWidth-tip.offsetWidth/2;
