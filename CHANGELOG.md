@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-10-08
+
+- Add opt-in public provider pages with hourly per-model estimated API token
+  value and a per-computer comparison using public chip names.
+- Estimate input from observed output and each hour's public network ratio.
+  Exclude unknown base rewards; label estimates, partial history, and gaps.
+- Keep provider identity configuration outside Git, use no account credentials,
+  and preserve existing score history, caching, and Cloudflare analytics.
+
 ## 0.2.1 — 2026-09-16
 
 - Fix double-averaged scores: average raw requests / max(1, loaded) once over

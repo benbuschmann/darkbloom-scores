@@ -4,7 +4,11 @@ This repository is the public Darkbloom all-model score website, not a provider
 manager and not the owner's private local tracker.
 
 - Keep the public service small: Python standard library, SQLite, plain HTML/SVG.
-- Use only public network capacity and pricing; no provider CLI or account keys.
+- Use only public network capacity, stats, and pricing; no provider CLI or account keys.
+- Opt-in provider pages may collect public counters for configured IDs. Keep
+  identity configuration outside Git, expose public chip-name labels, and
+  label network-ratio-based token values as estimates, not payouts. Base
+  rewards, per-provider input tokens, and historical model attribution are unknown.
 - Visitor analytics belong in Cloudflare. Do not reintroduce app-side IP/session
   storage, heartbeat endpoints, public traffic counters, or proxy attribution.
 - Never publish `.env`, SQLite databases, CSV history, visitor IP records,

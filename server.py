@@ -24,6 +24,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from provider_pages import ProviderPages, load_pages
 
 from warm_model_manager import (
     DEFAULT_BASE_URL,
@@ -411,6 +412,10 @@ class ScoreService:
         # The lock coalesces a burst of visitors requesting the same response.
         self._scores_lock = threading.Lock()
         self._scores_cache: OrderedDict[tuple[int, int], tuple[float, bytes, bool]] = OrderedDict()
+        config_path = os.environ.get("PROVIDER_PAGES_FILE")
+        config = Path(config_path).read_text() if config_path else os.environ.get("PROVIDER_PAGES_JSON", "{}")
+        self.provider_pages = ProviderPages(store.path, load_pages(config))
+        self.provider_error = None
 
     def read_scores(self, window: int, average: int = DEFAULT_AVERAGE_SECONDS) -> tuple[bytes, int]:
         if window not in WINDOW_BUCKETS:
@@ -455,6 +460,18 @@ class ScoreService:
                     self.last_error = str(error)
                     self._scores_cache.clear()
                 print(f"Score capture failed: {error}", flush=True)
+            if self.provider_pages.pages:
+                try:
+                    now = int(time.time())
+                    payload = get_json(f"{DEFAULT_BASE_URL.rstrip('/')}/api/stats")
+                    prices, _ = self.prices.read(now)
+                    if self.prices.last_error:
+                        prices = {}  # Do not price new hours with stale rates.
+                    self.provider_pages.capture(payload, prices, now)
+                    self.provider_error = self.prices.last_error
+                except (RuntimeError, OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
+                    self.provider_error = "Public provider collection unavailable"
+                    print("Public provider capture failed", flush=True)
             try:
                 self.store.prune(int(time.time()))
             except sqlite3.Error as error:
@@ -471,6 +488,18 @@ class ScoreHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith(("/providers/", "/api/providers/")):
+            slug = parsed.path.rsplit("/", 1)[-1]
+            pages = self.server.service.provider_pages
+            if slug not in pages.pages:
+                self.send_json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
+            elif parsed.path.startswith("/api/"):
+                payload = pages.read(slug, int(time.time()))
+                payload["warning"] = self.server.service.provider_error
+                self.send_json(payload)
+            else:
+                self.send_bytes(WEB_PATH.with_name("providers.html").read_bytes(), "text/html; charset=utf-8")
+            return
         if parsed.path in ("/", "/index.html"):
             self.send_bytes(WEB_PATH.read_bytes(), "text/html; charset=utf-8")
             return

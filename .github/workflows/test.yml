@@ -13,10 +13,12 @@ jobs:
         with:
           python-version: '3.12'
       - run: python fetch_manager.py
-      - run: python -m py_compile server.py fetch_manager.py test_server.py
+      - run: python -m py_compile server.py provider_pages.py fetch_manager.py test_server.py test_provider_pages.py
       - run: python -m unittest -v
       - name: Check frontend syntax
         run: node -e "new Function(require('fs').readFileSync('index.html','utf8').match(/<script>([\s\S]*?)<\/script>/)[1])"
+      - name: Check provider-page syntax
+        run: node -e "new Function(require('fs').readFileSync('providers.html','utf8').match(/<script>([\s\S]*?)<\/script>/)[1])"
       - name: Test per-model chart logic
         run: node --test test_frontend.js
       - name: Build image

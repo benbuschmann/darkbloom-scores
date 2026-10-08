@@ -103,6 +103,21 @@ shorter coverage until new data accumulates. No new environment variable is need
 
 ## Analytics: Cloudflare only
 
+### v0.3.0: opt-in public provider estimates
+
+Set `PROVIDER_PAGES_JSON` to the slug-to-ID-list configuration outside Git.
+Pages appear at `/providers/<slug>`, with chip-name computer labels. Keep the
+same volume and replica count. No Darkbloom credentials are required. Before
+creating provider tables, startup makes and checks an online SQLite backup at
+`/data/scores.sqlite3.before-provider-pages.backup` (owner-only permissions).
+Do not expose or commit this file. This is a local-volume backup, not off-server
+disaster recovery. The existing Cloudflare score cache rule is unchanged;
+provider-page responses are `no-store`. Collection begins after deployment;
+two consecutive public samples are needed for the first counter deltas.
+Confirm `/healthz` reports 0.3.0, provider history advances, chip labels appear,
+and existing score history remains available. Unknown base rewards and actual
+payouts are deliberately excluded.
+
 In Cloudflare Web Analytics, add/select this hostname and enable automatic
 setup for a proxied site. This is a Cloudflare account setting, not a Dokploy
 setting or a GitHub workflow. The app permits the edge-injected beacon in its

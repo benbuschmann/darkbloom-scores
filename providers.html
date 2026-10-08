@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Provider estimates · Darkbloom</title>
+<style>
+body{background:#0c1117;color:#e2e8f0;font:16px system-ui;margin:0}main{max-width:1100px;margin:auto;padding:30px 20px}a{color:#69aeff}h1{margin-bottom:8px}p,.muted{color:#a5b1be;line-height:1.55}.card{background:#161d25;border:1px solid #303943;border-radius:14px;padding:22px;margin:24px 0}.heading{display:flex;justify-content:space-between;gap:15px;flex-wrap:wrap}h2{font-size:20px;margin:0}svg{width:100%;height:auto}.legend{display:flex;gap:18px;flex-wrap:wrap;margin:12px 0}.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:7px}.barrow{display:grid;grid-template-columns:110px 1fr 180px;gap:15px;align-items:center;margin:22px 0}.track{background:#26303c;border-radius:4px;height:22px}.fill{height:100%;background:#27c5b3;border-radius:4px}.value{text-align:right;font-variant-numeric:tabular-nums}.small{font-size:13px;color:#a5b1be}table{width:100%;border-collapse:collapse;font-size:14px}td,th{text-align:left;padding:10px;border-bottom:1px solid #303943}#tableWrap{overflow-x:auto}@media(max-width:600px){.barrow{grid-template-columns:85px 1fr 110px;gap:8px}.card{padding:14px}}
+</style></head><body><main><a href="/">← All model scores</a><h1>My fleet · public estimates</h1>
+<p>Observed output tokens × public API prices, plus estimated input tokens using each hour’s network-wide input/output ratio. This ratio is not specific to your fleet or models. These are estimated API token values—not confirmed provider payouts.</p>
+<div id="status" class="muted" role="status">Loading public observations…</div>
+<section class="card"><div class="heading"><h2>Hourly estimated token value</h2><strong id="total"></strong></div><div id="legend" class="legend"></div><div id="chart"></div><p class="small">24 hourly buckets, including the partial current hour. No projections. Base rewards: unavailable publicly and excluded. Blank hours are not verified zero earnings.</p></section>
+<section class="card"><h2>Estimated value by computer · same hours</h2><p class="small">Names are public chip names. Matching chips get numbered labels; each label tracks a configured provider registration, not a guaranteed permanent machine identity.</p><div id="computers"></div></section>
+<section class="card"><h2>Observed hourly breakdown</h2><div id="tableWrap"><table><thead><tr><th>Hour</th><th>Computer</th><th>Model</th><th>Output tokens</th><th>Estimated input</th><th>Estimated value</th></tr></thead><tbody id="detail"></tbody></table></div></section>
+<p class="small">Collection starts when this page is enabled. Missing samples, counter resets, and gaps longer than 150 seconds are excluded. Model switches remain unattributed. Prices use the latest observed rate in each hour; cached-input discounts and payout adjustments are unknown.</p>
+</main><script>
+const colors=['#27c5b3','#579fff','#e4b93f','#bd8cf0','#ff9473','#72cb85'];
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money=v=>v==null?'Unavailable':'$'+v.toFixed(4);
+const num=v=>v==null?'Unavailable':Math.round(v).toLocaleString();
+const hour=t=>new Date(t*1000).toLocaleString([], {month:'short',day:'numeric',hour:'numeric'});
+async function refresh(){try{
+ const r=await fetch('/api/providers/'+location.pathname.split('/').pop());if(!r.ok)throw Error('Page unavailable');const d=await r.json();
+ const rows=d.rows, models=[...new Set(rows.filter(x=>x.estimated_usd!=null).map(x=>x.model))];
+ const total=rows.reduce((s,x)=>s+(x.estimated_usd||0),0);document.querySelector('#total').textContent=rows.length?money(total)+' estimated'+(rows.some(x=>x.estimated_usd==null)?' + unpriced tokens':''):'Collecting history…';
+ document.querySelector('#status').textContent=d.warning||(!d.last_sample_at?'Waiting for the first public sample.': 'Latest public sample: '+new Date(d.last_sample_at*1000).toLocaleString()+(d.now-d.last_sample_at>150?' · Collection is stale':'')+' · History is partial until collection has run for 24 hours.');
+ document.querySelector('#legend').innerHTML=models.map((m,i)=>`<span><i class="dot" style="background:${colors[i%colors.length]}"></i>${esc(m)}</span>`).join('');
+ const buckets=Array.from({length:24},(_,i)=>{const h=d.start+i*3600;return {h,values:models.map(m=>rows.filter(x=>x.hour===h&&x.model===m).reduce((s,x)=>s+(x.estimated_usd||0),0))}});
+ const max=Math.max(.001,...buckets.map(b=>b.values.reduce((a,v)=>a+v,0))),W=1000,H=270,left=60,bottom=225,top=20,bw=34,step=38;
+ let svg=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Hourly estimated token value by model">`;
+ for(let i=0;i<=4;i++){const y=bottom-(bottom-top)*i/4;svg+=`<path d="M${left} ${y}H985" stroke="#303943"/><text x="4" y="${y+4}" fill="#a5b1be" font-size="12">$${(max*i/4).toFixed(3)}</text>`}
+ buckets.forEach((b,i)=>{let y=bottom;b.values.forEach((v,j)=>{const ht=v/max*(bottom-top);y-=ht;svg+=`<rect x="${left+i*step}" y="${y}" width="${bw}" height="${ht}" fill="${colors[j%colors.length]}"><title>${esc(hour(b.h))} · ${esc(models[j])}: ${money(v)}</title></rect>`});if(i%4===0)svg+=`<text x="${left+i*step}" y="252" fill="#a5b1be" font-size="12">${esc(new Date(b.h*1000).toLocaleTimeString([],{hour:'numeric'}))}</text>`});
+ document.querySelector('#chart').innerHTML=svg+'</svg>';
+ const computers=d.computers.map(c=>{const rs=rows.filter(x=>x.computer===c);return {c,out:rs.reduce((s,x)=>s+x.output,0),value:rs.length?rs.reduce((s,x)=>s+(x.estimated_usd||0),0):null,unknown:rs.some(x=>x.estimated_usd==null)}}).sort((a,b)=>b.value-a.value);
+ const largest=Math.max(.00001,...computers.map(x=>x.value));document.querySelector('#computers').innerHTML=computers.map(x=>`<div class="barrow"><span>${esc(x.c)}</span><div class="track"><div class="fill" style="width:${100*x.value/largest}%"></div></div><div class="value">${money(x.value)}${x.unknown?' + unknown':''}<div class="small">${num(x.out)} output tokens</div></div></div>`).join('');
+ document.querySelector('#detail').innerHTML=rows.sort((a,b)=>b.hour-a.hour||a.computer.localeCompare(b.computer)).map(x=>`<tr><td>${esc(hour(x.hour))}</td><td>${esc(x.computer)}</td><td>${esc(x.model)}</td><td>${num(x.output)}</td><td>${num(x.estimated_input)}</td><td>${money(x.estimated_usd)}</td></tr>`).join('');
+ }catch(e){document.querySelector('#status').textContent='Could not refresh public estimates. '+e.message}}
+refresh();setInterval(refresh,60000);
+</script></body></html>

@@ -215,3 +215,28 @@ reasonable request limits. It is intended for modest traffic, not an unlimited
 API.
 
 Independent community project. [MIT license](LICENSE).
+# Optional public provider estimate pages
+
+Set `PROVIDER_PAGES_JSON` to a JSON object mapping a page slug to an ordered
+list of public provider IDs, or set `PROVIDER_PAGES_FILE` to a private JSON file
+with the same structure. Keep real identity configuration outside Git.
+The page is `/providers/<slug>`; only configured slugs are enabled.
+
+For the owner's local configuration, run with
+`PROVIDER_PAGES_FILE=data/provider-pages.json python3 server.py serve` and visit
+`http://127.0.0.1:8788/providers/my-fleet`.
+For Dokploy, configure the JSON environment variable on the application and
+redeploy with the existing persistent `/data` volume. Configuration is not
+shipped inside the image. Do not upload account responses or credentials.
+
+Public stats are collected once per minute. Output counter deltas are stored
+by provider/model/hour; lifetime counters are never treated as recent usage.
+Each hour's estimated input equals observed output × network prompt/completion
+ratio, updated as public minute samples become available. API token value uses
+the latest publicly observed price in that hour. This is not an actual payout:
+base rewards, cached-input discounts and provider payment adjustments are unknown.
+Gaps over 150 seconds, resets and initial baselines produce no invented tokens.
+Model-switch deltas retain their output counts but remain unpriced.
+Computer labels use public chip names, numbered for duplicates; registration changes need explicit
+configuration changes, not guesses about physical machine identity.
+Hourly history is retained for 38 days, with no per-request or visitor records.
