@@ -506,6 +506,9 @@ class ScoreHandler(BaseHTTPRequestHandler):
         if parsed.path == "/model-charts.js":
             self.send_bytes(WEB_PATH.with_name("model-charts.js").read_bytes(), "text/javascript; charset=utf-8")
             return
+        if parsed.path == "/provider-charts.js":
+            self.send_bytes(WEB_PATH.with_name("provider-charts.js").read_bytes(), "text/javascript; charset=utf-8")
+            return
         if parsed.path == "/healthz":
             self.send_json({"ok": True, "version": APP_VERSION})
             return

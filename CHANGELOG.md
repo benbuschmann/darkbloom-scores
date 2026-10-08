@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 — 2026-10-08
+
+- Show two stacked hourly estimate charts: by model and by chip-name computer.
+- Share the time range, total and dollar scale; add hour breakdown tooltips
+  for mouse, touch and keyboard. Faint current-hour bars are partial, not projected.
+- Preserve provider collection, saved history and unlisted page behavior.
+
 ## 0.3.0 — 2026-10-08
 
 - Add opt-in public provider pages with hourly per-model estimated API token

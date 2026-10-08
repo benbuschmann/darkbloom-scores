@@ -20,7 +20,7 @@ test('moving-average labels are independent of display windows', () => {
 
 test('release version matches Docker metadata', () => {
   const version = fs.readFileSync(path.join(__dirname,'VERSION'),'utf8').trim();
-  assert.equal(version,'0.3.0');
+  assert.equal(version,'0.3.1');
   const dockerfile = fs.readFileSync(path.join(__dirname,'Dockerfile'),'utf8');
   assert.ok(dockerfile.includes(`org.opencontainers.image.version="${version}"`));
 });
@@ -32,6 +32,22 @@ test('provider page is unlisted, non-indexable, and has no scores navigation', (
   assert.doesNotMatch(provider, /href="\/"/);
   assert.doesNotMatch(html, /href="\/providers\//);
   new Function(provider.match(/<script>([\s\S]*?)<\/script>/)[1]);
+});
+
+test('model and computer hourly stacks have equal totals and preserve missing hours', () => {
+  const provider = require('./provider-charts.js');
+  const rows = [{hour:3600,model:'m',computer:'A',output:10,estimated_usd:.1},
+    {hour:3600,model:'m',computer:'B',output:20,estimated_usd:.2},
+    {hour:7200,model:'n',computer:'A',output:30,estimated_usd:.3},
+    {hour:7200,model:'switch',computer:'B',output:40,estimated_usd:null}];
+  const models=provider.buckets(rows,['m','n'],'model',3600);
+  const computers=provider.buckets(rows,['A','B'],'computer',3600);
+  assert.equal(models.length,24);
+  assert.deepEqual(models.map(b=>b.total),computers.map(b=>b.total));
+  assert.deepEqual(computers[0].values,[.1,.2]);
+  assert.equal(models[1].unpriced,40);
+  assert.equal(models[2].observed,false);
+  assert.ok(!provider.legend(['<script>']).includes('<script>'));
 });
 
 test('requests above capacity are not capped, and missing/zero load is undefined', () => {
