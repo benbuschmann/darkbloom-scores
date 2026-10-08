@@ -27,6 +27,8 @@ class ScoreFeedTests(unittest.TestCase):
         with patch.dict('os.environ', {'TRACK_ALL_PUBLIC_PROVIDERS':'1','PROVIDER_PAGES_JSON':'{}'}):
             service=score_feed.ScoreService(self.store)
         pid='00000000-0000-0000-0000-000000000001'
+        import base64
+        service.provider_pages.capture_keys({'providers':[{'provider_id':pid,'se_public_key':base64.b64encode(bytes(64)).decode()}]})
         service.provider_pages.capture({'providers':[{'id':pid,'chip':'Apple M5','tokens_generated':100}]},{},3600)
         a=service.read_providers(search='Apple')
         self.assertEqual(json.loads(a)['total'],1)

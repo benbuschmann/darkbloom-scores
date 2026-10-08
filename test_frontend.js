@@ -34,7 +34,8 @@ test('provider page is unlisted, non-indexable, and has no scores navigation', (
   new Function(provider.match(/<script>([\s\S]*?)<\/script>/)[1]);
   const directory=fs.readFileSync(path.join(__dirname,'provider-directory.html'),'utf8');
   new Function(directory.match(/<script>([\s\S]*?)<\/script>/)[1]);
-  assert.match(directory,/encodeURIComponent\(p.provider_id\)/);
+  assert.match(directory,/encodeURIComponent\(p.page_slug\)/);
+  assert.match(directory,/esc\(p.public_key\)/);
 });
 
 test('model and computer hourly stacks have equal totals and preserve missing hours', () => {

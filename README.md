@@ -219,8 +219,11 @@ Independent community project. [MIT license](LICENSE).
 
 Set `TRACK_ALL_PUBLIC_PROVIDERS=1` to record every public provider from the same
 shared minute stats pull. `/providers` is a paginated directory searchable by
-ID, chip or model; `/providers/<provider-id>` shows each observed registration's
-hourly estimates. Departed IDs keep their recorded history. Unknown IDs return
+SE public key, chip or model; `/providers/se-<key-fingerprint>` combines observed
+connections of that key into hourly estimates. Keys are joined from the public
+attestation endpoint once per minute. Connection IDs remain internal accounting
+handles; existing ID links remain compatible but are not listed or searchable.
+Departed connections keep their recorded history. Unknown keys return
 404 and never trigger an upstream request or create database records.
 Directory entries never disclose private aggregate-page slugs or account
 membership. Your configured fleet pages continue working separately, unlisted.

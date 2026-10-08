@@ -3,6 +3,8 @@ import json
 import sqlite3
 import os
 import re
+import base64
+import hashlib
 from contextlib import contextmanager, closing
 from pathlib import Path
 
@@ -52,11 +54,34 @@ class ProviderPages:
                     hour INTEGER, model TEXT, input REAL, output REAL,
                     PRIMARY KEY(hour,model));
                 CREATE INDEX IF NOT EXISTS public_provider_usage_hour ON public_provider_usage(hour);
+                CREATE TABLE IF NOT EXISTS public_provider_keys (
+                    provider TEXT PRIMARY KEY, public_key TEXT NOT NULL, fingerprint TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS public_provider_keys_fingerprint ON public_provider_keys(fingerprint);
             ''')
+
+    def capture_keys(self, payload):
+        with self.connect() as db:
+            for row in payload.get('providers', []):
+                pid, key = row.get('provider_id'), row.get('se_public_key')
+                if not isinstance(pid, str) or not isinstance(key, str):
+                    continue
+                try:
+                    raw = base64.b64decode(key, validate=True)
+                except ValueError:
+                    continue
+                if len(raw) != 64:
+                    continue
+                fingerprint = hashlib.sha256(raw).hexdigest()
+                db.execute('INSERT OR IGNORE INTO public_provider_keys VALUES(?,?,?)', (pid,key,fingerprint))
 
     def ids_for(self, slug):
         if slug in self.pages:
             return self.pages[slug]
+        if self.track_all and re.fullmatch(r'se-[a-f0-9]{64}', slug):
+            with self.connect() as db:
+                ids = [r[0] for r in db.execute('SELECT provider FROM public_provider_keys WHERE fingerprint=? ORDER BY provider', (slug[3:],))]
+            if ids:
+                return ids
         if self.track_all and re.fullmatch(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', slug):
             with self.connect() as db:
                 if db.execute('SELECT 1 FROM public_provider_samples WHERE provider=?',(slug,)).fetchone():
@@ -65,15 +90,18 @@ class ProviderPages:
 
     def directory(self, search='', offset=0):
         # Never enumerate private aggregate-page slugs or account memberships.
-        query='%'+search[:64].replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
+        query='%'+search[:128].replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%'
         with self.connect() as db:
-            sql="""FROM public_provider_samples s LEFT JOIN public_provider_chips c ON c.provider=s.provider
+            sql="""FROM (SELECT s.*,k.public_key,k.fingerprint,
+                   ROW_NUMBER() OVER(PARTITION BY k.fingerprint ORDER BY s.at DESC,s.provider) AS rank
+                   FROM public_provider_samples s JOIN public_provider_keys k ON k.provider=s.provider) s
+                   LEFT JOIN public_provider_chips c ON c.provider=s.provider
                    LEFT JOIN public_provider_hardware h ON h.provider=s.provider
-                   WHERE s.provider LIKE ? ESCAPE '\\' OR c.chip LIKE ? ESCAPE '\\' OR s.model LIKE ? ESCAPE '\\'"""
+                   WHERE s.rank=1 AND (s.public_key LIKE ? ESCAPE '\\' OR c.chip LIKE ? ESCAPE '\\' OR s.model LIKE ? ESCAPE '\\')"""
             args=(query,query,query)
             count=db.execute('SELECT COUNT(*) '+sql,args).fetchone()[0]
-            rows=db.execute('SELECT s.provider,c.chip,h.ram,h.status,s.model,s.at '+sql+' ORDER BY s.provider LIMIT 100 OFFSET ?',args+(offset,)).fetchall()
-        return dict(total=count,offset=offset,limit=100,rows=[dict(provider_id=p,chip=c or 'Unknown chip',ram=ram,status=st or 'unknown',model=m,last_seen=at) for p,c,ram,st,m,at in rows])
+            rows=db.execute('SELECT s.public_key,s.fingerprint,c.chip,h.ram,h.status,s.model,s.at '+sql+' ORDER BY s.fingerprint LIMIT 100 OFFSET ?',args+(offset,)).fetchall()
+        return dict(total=count,offset=offset,limit=100,rows=[dict(public_key=k,page_slug='se-'+f,chip=c or 'Unknown chip',ram=ram,status=st or 'unknown',model=m,last_seen=at) for k,f,c,ram,st,m,at in rows])
 
     @contextmanager
     def connect(self):
@@ -142,6 +170,10 @@ class ProviderPages:
             chips = {pid:(db.execute('SELECT chip FROM public_provider_chips WHERE provider=?',(pid,)).fetchone() or [''])[0] for pid in ids}
             names = [chips.get(pid) or f'Computer {chr(65+n)}' for n,pid in enumerate(ids)]
             labels = [f'{name} · {1+names[:n].count(name)}' if names.count(name)>1 else name for n,name in enumerate(names)]
+            if slug.startswith('se-'):
+                # Reconnected sessions of one public key remain one computer.
+                latest_id = max(ids, key=lambda pid:(db.execute('SELECT at FROM public_provider_samples WHERE provider=?',(pid,)).fetchone() or [0])[0])
+                labels = [chips.get(latest_id) or 'Computer'] * len(ids)
             ratios = {h: (i/o if o else None) for h,i,o in db.execute('SELECT (at/3600)*3600,SUM(input),SUM(output) FROM public_network_minutes WHERE at>=? GROUP BY 1', (start,))}
             prices = {(h,m):(i,o) for h,m,i,o in db.execute('SELECT hour,model,input,output FROM public_hour_prices WHERE hour>=?', (start,))}
             latest = max((db.execute('SELECT at FROM public_provider_samples WHERE provider=?',(pid,)).fetchone() or [0])[0] for pid in ids) or None
@@ -152,7 +184,7 @@ class ProviderPages:
                     inp = out*ratio if ratio is not None else None
                     value = (inp*price[0]+out*price[1])/1e6 if inp is not None and price else None
                     rows.append(dict(computer=labels[n],hour=h,model=m,output=out,estimated_input=inp,estimated_usd=value))
-        return dict(rows=rows, computers=labels, last_sample_at=latest, start=start, now=now,
+        return dict(rows=rows, computers=list(dict.fromkeys(labels)), last_sample_at=latest, start=start, now=now,
                     page_title='Provider · public estimates' if slug not in self.pages else 'My fleet · public estimates')
 
 

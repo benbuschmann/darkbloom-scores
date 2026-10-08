@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import base64
 from pathlib import Path
 from provider_pages import ProviderPages, load_pages
 from warm_model_manager import ModelPrice
@@ -60,6 +61,7 @@ class ProviderEstimateTests(unittest.TestCase):
         pid='00000000-0000-0000-0000-000000000001'
         store=ProviderPages(Path(self.tmp.name)/'all.db', {'secret-fleet':[pid]},track_all=True)
         row={'id':pid,'chip':'Apple M5 Max','tokens_generated':1000,'current_model':'m','memory_gb':64,'status':'online'}
+        store.capture_keys({'providers':[{'provider_id':pid,'se_public_key':base64.b64encode(bytes(64)).decode()}]})
         store.capture({'providers':[row]},self.prices,3600)
         row['tokens_generated']=1100
         store.capture({'providers':[row]},self.prices,3660)
@@ -76,11 +78,28 @@ class ProviderEstimateTests(unittest.TestCase):
     def test_directory_paging_and_literal_search(self):
         store=ProviderPages(Path(self.tmp.name)/'many.db',{},track_all=True)
         providers=[{'id':f'00000000-0000-0000-0000-{n:012d}','chip':'chip','tokens_generated':0} for n in range(105)]
+        store.capture_keys({'providers':[{'provider_id':p['id'],'se_public_key':base64.b64encode(bytes([n])*64).decode()} for n,p in enumerate(providers)]})
         store.capture({'providers':providers},{},3600)
         self.assertEqual(store.directory()['total'],105)
         self.assertEqual(len(store.directory()['rows']),100)
         self.assertEqual(len(store.directory(offset=100)['rows']),5)
         self.assertEqual(store.directory('%')['total'],0)
+
+    def test_public_key_combines_reconnected_sessions(self):
+        store=ProviderPages(Path(self.tmp.name)/'keys.db',{},track_all=True)
+        key=base64.b64encode(bytes(range(64))).decode()
+        ids=['00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002']
+        for n,pid in enumerate(ids):
+            store.capture_keys({'providers':[{'provider_id':pid,'se_public_key':key}]})
+            for t,tokens in [(3600+n*120,100),(3660+n*120,150)]:
+                store.capture({'providers':[{'id':pid,'chip':'Apple M5','tokens_generated':tokens,'current_model':'m'}]},self.prices,t)
+        directory=store.directory(key)
+        self.assertEqual(directory['total'],1)
+        self.assertNotIn('provider_id',directory['rows'][0])
+        page=store.read(directory['rows'][0]['page_slug'],3900)
+        self.assertEqual(page['computers'],['Apple M5'])
+        self.assertEqual(sum(r['output'] for r in page['rows']),100)
+        self.assertEqual(store.directory(ids[0])['total'],0)
 
     def test_missing_counter_creates_no_invented_tokens(self):
         self.capture(3600,1000)

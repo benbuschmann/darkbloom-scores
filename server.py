@@ -480,6 +480,7 @@ class ScoreService:
                 try:
                     now = int(time.time())
                     payload = get_json(f"{DEFAULT_BASE_URL.rstrip('/')}/api/stats")
+                    self.provider_pages.capture_keys(get_json('https://api.darkbloom.dev/v1/providers/attestation'))
                     prices, _ = self.prices.read(now)
                     if self.prices.last_error:
                         prices = {}  # Do not price new hours with stale rates.
@@ -514,7 +515,7 @@ class ScoreHandler(BaseHTTPRequestHandler):
             else:
                 try:
                     query=parse_qs(parsed.query)
-                    search=query.get('search',[''])[0][:64]
+                    search=query.get('search',[''])[0][:128]
                     offset=max(0,min(1000000,int(query.get('offset',['0'])[0])))
                     body=self.server.service.read_providers(search=search,offset=offset)
                     self.send_bytes(body,'application/json; charset=utf-8')
