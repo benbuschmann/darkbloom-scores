@@ -3,6 +3,22 @@ const assert = require('node:assert/strict');
 const charts = require('./model-charts.js');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
+
+test('provider JSON import extracts only public keys locally and rejects incomplete lists', () => {
+  const html=fs.readFileSync(path.join(__dirname,'provider-directory.html'),'utf8');
+  const source=html.match(/function extractFleetKeys\(text\)\{[\s\S]*?\n\}/)[0];
+  const context=vm.createContext({});vm.runInContext(source,context);
+  const parse=context.extractFleetKeys;
+  const result=parse(JSON.stringify({account_id:'private',providers:[
+    {se_public_key:' key-a ',account_id:'private',provider_key:'secret'},
+    {se_public_key:'key-a'},{se_public_key:'key-b'}]}));
+  assert.deepEqual(Array.from(result),['key-a','key-b']);
+  for(const text of ['bad','null','{}','{"providers":[]}','{"providers":[{"id":"uuid"}]}'])assert.throws(()=>parse(text));
+  assert.match(html,/body:JSON.stringify\(\{keys\}\)/);
+  assert.match(html,/document.querySelector\('#fleet-json'\).value=''/);
+  assert.doesNotMatch(html,/localStorage|sessionStorage/);
+});
 
 test('moving-average labels are independent of display windows', () => {
   assert.equal(charts.averageLabel(900), '15m');

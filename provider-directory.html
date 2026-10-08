@@ -9,9 +9,28 @@ const fleetForm=document.createElement('section');
 fleetForm.style.cssText='padding:20px;background:#161d25;border:1px solid #43505f;border-radius:12px;margin:24px 0';
 fleetForm.innerHTML='<h2>Create your fleet</h2><label for="fleet-keys">SE public keys · one per line</label><p><textarea id="fleet-keys" rows="5" maxlength="8192" placeholder="Paste each computer’s complete SE public key here" style="box-sizing:border-box;width:100%;padding:12px;background:#0c1117;color:inherit;border:1px solid #43505f;border-radius:8px;font:14px monospace"></textarea></p><p>Up to 26 computers. Duplicate keys are combined. Only these public keys are saved—no login or account data. This is a user-selected group, not verified ownership. Anyone with the unlisted link can view the fleet.</p><button id="create-fleet" type="button">Create fleet link</button><p id="fleet-result" role="status" aria-live="polite"></p>';
 guide.after(fleetForm);
+const jsonForm=document.createElement('details');
+jsonForm.innerHTML='<summary>Option 2: paste your logged-in provider JSON</summary><p>While logged in to Darkbloom, open <a href="https://console.darkbloom.dev/api/me/providers" target="_blank" rel="noopener noreferrer">your provider list in a new tab</a>. Copy the whole JSON response, paste it below, then click Create fleet from JSON.</p><label for="fleet-json">Provider JSON</label><p><textarea id="fleet-json" rows="5" maxlength="1048576" autocomplete="off" spellcheck="false" placeholder="{ &quot;providers&quot;: [ ... ] }" style="box-sizing:border-box;width:100%;padding:12px;background:#0c1117;color:inherit;border:1px solid #43505f;border-radius:8px;font:14px monospace"></textarea></p><p>The JSON is parsed only in this browser. Only SE public keys are sent and saved; account IDs, balances, metrics and other fields are discarded. No API key, password or browser credentials are needed. The pasted JSON is cleared after successful creation.</p><button id="create-json-fleet" type="button">Create fleet from JSON</button><p id="json-fleet-result" role="status" aria-live="polite"></p>';
+fleetForm.append(jsonForm);
+function extractFleetKeys(text){
+ let data;try{data=JSON.parse(text);}catch{throw Error('Paste the complete JSON response from the provider-list link.');}
+ if(!data||!Array.isArray(data.providers)||!data.providers.length)throw Error('The JSON must contain a nonempty providers list.');
+ const keys=data.providers.map(p=>p&&typeof p.se_public_key==='string'?p.se_public_key.trim():'');
+ if(keys.some(k=>!k))throw Error('Some providers have no SE public key. No fleet was saved. Use the public-key option for the computers you can identify.');
+ return [...new Set(keys)];
+}
 document.querySelector('#create-fleet').onclick=async()=>{
- const button=document.querySelector('#create-fleet'),result=document.querySelector('#fleet-result');
  const keys=document.querySelector('#fleet-keys').value.trim().split(/[\s,]+/).filter(Boolean);
+ await saveFleet(keys,document.querySelector('#create-fleet'),document.querySelector('#fleet-result'));
+};
+document.querySelector('#create-json-fleet').onclick=async()=>{
+ const result=document.querySelector('#json-fleet-result');
+ try{
+  const keys=extractFleetKeys(document.querySelector('#fleet-json').value);
+  if(await saveFleet(keys,document.querySelector('#create-json-fleet'),result))document.querySelector('#fleet-json').value='';
+ }catch(error){result.textContent=error.message;}
+};
+async function saveFleet(keys,button,result){
  if(!keys.length||keys.length>26){result.textContent='Paste 1–26 public keys, one per line.';return;}
  button.disabled=true;result.textContent='Saving your fleet…';
  try{
@@ -20,8 +39,9 @@ document.querySelector('#create-fleet').onclick=async()=>{
   if(!/^\/providers\/fleet-[a-f0-9]{32}$/.test(data.url))throw Error('Invalid fleet response.');
   result.textContent=data.computers+' computer(s) saved. Bookmark this link: ';
   const link=document.createElement('a');link.href=data.url;link.textContent=location.origin+data.url;link.style.overflowWrap='anywhere';result.append(link);
+  return true;
  }catch(error){result.textContent=error.message||'Could not save fleet. Please try again.';}finally{button.disabled=false;}
-};
+}
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let offset=0,seq=0,timer;
 async function load(){const request=++seq;try{

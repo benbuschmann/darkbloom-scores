@@ -217,6 +217,13 @@ API.
 Independent community project. [MIT license](LICENSE).
 # Optional public provider estimate pages
 
+The directory also accepts the JSON copied from
+`https://console.darkbloom.dev/api/me/providers` while logged in. It extracts
+`providers[].se_public_key` in the browser and submits only the deduplicated
+public keys to the existing fleet endpoint. The full JSON is never sent or
+saved by this tool and is cleared after successful creation. Invalid JSON or
+providers missing keys are rejected rather than silently creating a partial fleet.
+
 The `/providers` directory includes **Create your fleet**: paste 1–26 complete
 SE public keys, one per line, to save an unlisted random fleet URL. Duplicate keys
 are combined; membership persists in SQLite across deploys and connections are
