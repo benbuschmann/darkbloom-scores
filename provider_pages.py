@@ -97,7 +97,7 @@ class ProviderPages:
             # Additive migration: do not rewrite legacy usage or pretend it has job coverage.
             for table, columns in {
                 'public_provider_samples': [('requests','INTEGER'),('models','TEXT'),('rates','TEXT')],
-                'public_provider_usage': [('requests','INTEGER')],
+                'public_provider_usage': [('requests','INTEGER'),('requests_partial','INTEGER NOT NULL DEFAULT 1')],
                 'public_hour_prices': [('at','INTEGER')],
             }.items():
                 existing={r[1] for r in db.execute('PRAGMA table_info('+table+')')}
@@ -123,10 +123,12 @@ class ProviderPages:
             # Match the rolling 24h stats output denominator within 120 seconds.
             work=counter(totals.get('work_earnings_micro_usd')); output=counter(stats.get('last_24h_completion_tokens'))
             if work is None or not output or not totals.get('updated_at'):
-                return  # Keep valid ratio buckets even when payout calibration is unavailable.
+                return 'Network payout proxy unavailable: missing public earnings/output totals.'
             total_at=timestamp(totals['updated_at']); stats_at=timestamp(stats['snapshot_at'])
             if totals.get('window')=='24h' and work is not None and output and abs(total_at-stats_at)<=120 and 0 <= fetched_at-total_at <= 180 and stats_at<=fetched_at:
                 db.execute('INSERT OR REPLACE INTO public_network_calibration VALUES(?,?,?)',(stats_at//3600*3600,total_at,work/1e6/output))
+            else:
+                return 'Network payout proxy unavailable: source alignment '+str(abs(total_at-stats_at))+'s, totals age '+str(fetched_at-total_at)+'s (limits 120s / 180s).'
 
     def create_fleet(self, keys):
         if not isinstance(keys,list) or not 1 <= len(keys) <= 26:
@@ -298,8 +300,8 @@ class ProviderPages:
                         end = min(now, hour + 3600)
                         part = remaining_output if end == now else round(remaining_output * (end-start)/(now-start))
                         job_part=remaining_jobs if end==now or remaining_jobs is None else round(remaining_jobs*(end-start)/(now-start))
-                        db.execute('INSERT INTO public_provider_usage(provider,hour,model,output,requests) VALUES(?,?,?,?,?) ON CONFLICT(provider,hour,model) DO UPDATE SET output=output+excluded.output,requests=CASE WHEN requests IS NULL OR excluded.requests IS NULL THEN NULL ELSE requests+excluded.requests END',
-                                   (pid, hour, attributed, part,job_part))
+                        db.execute('INSERT INTO public_provider_usage(provider,hour,model,output,requests,requests_partial) VALUES(?,?,?,?,?,?) ON CONFLICT(provider,hour,model) DO UPDATE SET output=output+excluded.output,requests=CASE WHEN requests IS NULL AND excluded.requests IS NULL THEN NULL ELSE COALESCE(requests,0)+COALESCE(excluded.requests,0) END,requests_partial=MAX(requests_partial,excluded.requests_partial)',
+                                   (pid, hour, attributed, part,job_part,int(job_part is None)))
                         remaining_output-=part
                         if remaining_jobs is not None: remaining_jobs-=job_part
                         start = end
@@ -342,7 +344,7 @@ class ProviderPages:
             prices = {(h,m):(i,o,at) for h,m,i,o,at in db.execute('SELECT hour,model,input,output,at FROM public_hour_prices WHERE hour>=?', (start,))}
             latest = max(((db.execute('SELECT at FROM public_provider_samples WHERE provider=?',(pid,)).fetchone() or [0])[0] for pid in ids),default=0) or None
             for n,pid in enumerate(ids):
-                for h,m,out,jobs in db.execute('SELECT hour,model,output,requests FROM public_provider_usage WHERE provider=? AND hour>=?', (pid,start)):
+                for h,m,out,jobs,jobs_partial in db.execute('SELECT hour,model,output,requests,requests_partial FROM public_provider_usage WHERE provider=? AND hour>=?', (pid,start)):
                     ratio,coverage=ratios.get(h,(None,0))
                     shared=m.startswith('Shared catalog: ')
                     models=json.loads(m[len('Shared catalog: '):]) if shared else [m]
@@ -358,7 +360,7 @@ class ProviderPages:
                     # token value. Three alternatives are exposed, not averaged.
                     rows.append(dict(computer=labels[n],hour=h,model='Shared catalog' if shared else m,
                                      models=models,shared=shared,unattributed=m=='Unattributed model switch',
-                                     output=out,requests=jobs,estimated_input=inp,
+                                     output=out,requests=jobs,requests_partial=bool(jobs_partial),estimated_input=inp,
                                      estimated_usd=calibrated,calibrated_usd=calibrated,
                                      calibration_at=cal[0] if cal else None,
                                      output_floor_usd=floor_low,output_ceiling_usd=floor_high,

@@ -315,7 +315,10 @@ interval, >150s gap counts, resets/jumps, ambiguous-output share, ratio buckets 
 and price freshness. A gap is recorded in every overlapping hour. Concurrent
 sessions' minute/eligibility bitmaps are unioned by public key, never summed.
 There are no raw per-poll or per-job records. Legacy request/coverage data stays
-unknown; sparse sampling can undercount and hour-boundary allocation is approximate.
+unknown; known request deltas appended to legacy hours are visible but explicitly
+partial. Sparse sampling can undercount and hour-boundary allocation is approximate.
+Rejected or missing payout calibration is surfaced as a warning with source
+alignment/age, not silently displayed as zero revenue.
 
 **Base scenario:** the official monthly memory tiers are 24/$10, 32/$12,
 48/$16, 64/$18, 96/$22, 128/$26, 192/$30, 512/$40. UTC calendar-month proration

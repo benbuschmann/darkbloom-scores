@@ -142,12 +142,18 @@ class ProviderEstimateTests(unittest.TestCase):
         store=ProviderPages(path,{'fleet':['p']})
         row=store.read('fleet',4000)['rows'][0]
         self.assertEqual(row['output'],75);self.assertIsNone(row['requests']);self.assertIsNone(row['ratio_usd'])
+        self.assertTrue(row['requests_partial'])
         self.assertEqual(store.read('fleet',4000)['coverage'],[])
         backup=path.with_name(path.name+'.before-provider-quality.backup')
         with sqlite3.connect('file:'+str(backup)+'?mode=ro',uri=True) as db:
             self.assertEqual(db.execute('PRAGMA quick_check').fetchone()[0],'ok')
             self.assertEqual(db.execute('SELECT output FROM public_provider_usage').fetchone()[0],75)
         ProviderPages(path,{'fleet':['p']})  # migration is idempotent
+        for at,tokens,jobs in [(3720,150,10),(3780,200,13)]:
+            store.capture({'providers':[{'id':'p','tokens_generated':tokens,'requests_served':jobs,'current_model':'m'}]},self.prices,at)
+        row=store.read('fleet',4000)['rows'][0]
+        self.assertEqual(row['requests'],3);self.assertTrue(row['requests_partial'])
+        self.assertEqual(row['output'],175)
 
     def test_invalid_or_partial_series_does_not_change_saved_buckets(self):
         self.network()
@@ -189,7 +195,8 @@ class ProviderEstimateTests(unittest.TestCase):
     def test_totals_failure_keeps_valid_ratio_buckets(self):
         series={'window':'24h','bucket_seconds':1800,'start_at':'1969-12-31T02:00:00Z','end_at':'1970-01-01T02:00:00Z',
                 'time_series':[{'timestamp':'1970-01-01T01:00:00Z','prompt_tokens':1000,'completion_tokens':100}]}
-        self.store.capture_network(series,{}, {},7200)
+        warning=self.store.capture_network(series,{}, {},7200)
+        self.assertIn('missing public earnings/output totals',warning)
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM public_network_buckets').fetchone()[0],1)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM public_network_calibration').fetchone()[0],0)

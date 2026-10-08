@@ -512,7 +512,8 @@ class ScoreService:
                             totals=get_json('https://api.darkbloom.dev/v1/network/totals?window=24h')
                         except (RuntimeError,OSError,ValueError) as error:
                             totals={};network_error='Network payout calibration unavailable'
-                        self.provider_pages.capture_network(series,totals,payload,int(time.time()))
+                        calibration_warning=self.provider_pages.capture_network(series,totals,payload,int(time.time()))
+                        network_error=network_error or calibration_warning
                     except (RuntimeError,OSError,sqlite3.Error,ValueError,KeyError) as error:
                         network_error='Network estimate inputs unavailable: '+str(error)
                     self.provider_error = self.prices.last_error or network_error

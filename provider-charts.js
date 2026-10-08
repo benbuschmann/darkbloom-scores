@@ -14,6 +14,7 @@
               unpriced:observed.filter(r=>r.estimated_usd==null).reduce((sum,r)=>sum+r.output,0),
               output:observed.reduce((sum,r)=>sum+r.output,0),
               requests:observed.length && observed.every(r=>r.requests!=null)?observed.reduce((sum,r)=>sum+r.requests,0):null,
+              requests_partial:observed.some(r=>r.requests_partial || r.requests==null),
               estimates:Object.fromEntries(['output_floor_usd','output_ceiling_usd','calibrated_usd','ratio_usd','ratio_high_usd'].map(field=>[field,observed.length && observed.every(r=>r[field]!=null)?observed.reduce((sum,r)=>sum+r[field],0):null]))};
     });
   }
@@ -44,7 +45,7 @@
       const i=Number(target.dataset.index), b=data[i];
       const label=new Date(b.hour*1000).toLocaleString([], {weekday:'short',hour:'numeric'});
       tip.innerHTML=`<div class="muted">${esc(label)}${b.hour===Math.floor(now/3600)*3600?' · partial hour':''}</div><strong>${b.estimate_available?money(b.total)+(b.complete?' estimated':' partial estimate'):b.observed?'Selected estimate unavailable':'No observations'}</strong>`+
-        (b.observed?groups.map((g,j)=>`<div class="tooltip-row"><span><i class="dot" style="background:${colors[j%colors.length]}"></i>${esc(g)}</span><b>${money(b.values[j])}</b></div>`).join('')+`<div class="small">${b.output.toLocaleString()} observed output tokens · ${b.requests==null?'unknown':b.requests.toLocaleString()} observed requests</div><div class="small">Output-only API proxy: ${money(b.estimates.output_floor_usd)}–${money(b.estimates.output_ceiling_usd)}</div><div class="small">Network payout proxy: ${money(b.estimates.calibrated_usd)}</div><div class="small">Input-ratio API proxy: ${money(b.estimates.ratio_usd)}–${money(b.estimates.ratio_high_usd)}</div>`:'')+
+        (b.observed?groups.map((g,j)=>`<div class="tooltip-row"><span><i class="dot" style="background:${colors[j%colors.length]}"></i>${esc(g)}</span><b>${money(b.values[j])}</b></div>`).join('')+`<div class="small">${b.output.toLocaleString()} observed output tokens · ${b.requests==null?'unknown':b.requests.toLocaleString()} observed requests${b.requests_partial?' (partial)':''}</div><div class="small">Output-only API proxy: ${money(b.estimates.output_floor_usd)}–${money(b.estimates.output_ceiling_usd)}</div><div class="small">Network payout proxy: ${money(b.estimates.calibrated_usd)}</div><div class="small">Input-ratio API proxy: ${money(b.estimates.ratio_usd)}–${money(b.estimates.ratio_high_usd)}</div>`:'')+
         (b.unpriced?`<div class="small">Plus ${b.unpriced.toLocaleString()} output tokens without the selected estimate</div>`:'');
       tip.hidden=false;
       // Anchor inside the chart; clamp so edge hours never overflow the card.

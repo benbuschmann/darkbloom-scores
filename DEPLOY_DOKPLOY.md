@@ -114,7 +114,9 @@ Existing counters, usage, public-key fleets and score history are preserved. Old
 minute ratios are ignored, and legacy jobs/coverage remain unknown. New coverage,
 job-counter deltas and calibration start on upgrade; completed series buckets
 can restore ratio coverage for the most recent 24h. Verify two increasing source
-sample timestamps, fleet membership preservation, and `/healthz` version 0.5.0.
+sample timestamps, fleet membership preservation, and `/healthz` version 0.5.1.
+v0.5.1 additionally shows known request deltas in legacy hours as partial and
+surfaces rejected/missing calibration instead of silently hiding its reason.
 Do not run an older image against the expanded schema (old positional INSERTs);
 recover from a consistent backup on a separate volume if rollback is necessary.
 

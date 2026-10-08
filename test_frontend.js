@@ -36,7 +36,7 @@ test('moving-average labels are independent of display windows', () => {
 
 test('release version matches Docker metadata', () => {
   const version = fs.readFileSync(path.join(__dirname,'VERSION'),'utf8').trim();
-  assert.equal(version,'0.5.0');
+  assert.equal(version,'0.5.1');
   const dockerfile = fs.readFileSync(path.join(__dirname,'Dockerfile'),'utf8');
   assert.ok(dockerfile.includes(`org.opencontainers.image.version="${version}"`));
 });
