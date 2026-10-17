@@ -5,6 +5,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+test('leaderboard emphasizes uncertainty, independent public data and safe rendering', () => {
+  const html=fs.readFileSync(path.join(__dirname,'leaderboard.html'),'utf8');
+  new Function(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+  assert.match(html,/all-time paid jobs/);
+  assert.match(html,/not proof of account ownership/);
+  assert.match(html,/Unconfirmed candidate/);
+  assert.match(html,/Ambiguous resemblance/);
+  assert.match(html,/esc\(r.pseudonym\)/);
+  assert.doesNotMatch(html,/Authorization|localStorage|sessionStorage|fleet-[a-f0-9]{32}/);
+});
+
 test('provider JSON import extracts only public keys locally and rejects incomplete lists', () => {
   const html=fs.readFileSync(path.join(__dirname,'provider-directory.html'),'utf8');
   const source=html.match(/function extractFleetKeys\(text\)\{[\s\S]*?\n\}/)[0];
@@ -36,7 +47,7 @@ test('moving-average labels are independent of display windows', () => {
 
 test('release version matches Docker metadata', () => {
   const version = fs.readFileSync(path.join(__dirname,'VERSION'),'utf8').trim();
-  assert.equal(version,'0.5.1');
+  assert.equal(version,'0.6.0');
   const dockerfile = fs.readFileSync(path.join(__dirname,'Dockerfile'),'utf8');
   assert.ok(dockerfile.includes(`org.opencontainers.image.version="${version}"`));
 });

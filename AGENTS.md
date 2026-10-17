@@ -39,3 +39,8 @@ manager and not the owner's private local tracker.
   public-eligibility scenarios only; do not claim private eligibility or pool slots.
 - Preserve real data volumes during redeployment. Use consistent SQLite
   backups and never expose them through the public HTTP server.
+- The user authorized /leaderboard experimental public activity candidates.
+  Never present inferred ownership as confirmed or enumerate private fleets.
+  Persist hourly aggregates only. Use cumulative job deltas, not uncorrected
+  rolling-window changes. Keep owner-supplied reference grouping in environment
+  configuration; expose only aggregate validation error, never its fleet URL/keys.

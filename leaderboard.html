@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Darkbloom leaderboard investigator</title>
+<style>
+:root{color-scheme:dark}body{margin:0;background:#0c1117;color:#e2e8f0;font:16px system-ui}main{max-width:1200px;margin:auto;padding:28px 20px}a{color:#80bbff}nav{display:flex;gap:24px}h1{margin-bottom:8px}p{line-height:1.6;color:#b5c0cd}.panel{padding:20px;background:#151c24;border:1px solid #354150;border-radius:12px;margin:24px 0}.table{overflow:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:13px 12px;border-bottom:1px solid #354150;text-align:left;white-space:nowrap}th{color:#a5b5c7}td.num{text-align:right;font-variant-numeric:tabular-nums}input{box-sizing:border-box;width:min(500px,100%);font:inherit;padding:12px;background:#0c1117;border:1px solid #65778d;border-radius:8px;color:inherit}.tag{color:#ffd27a}.muted{color:#b5c0cd}strong{color:#eef4fc}#status{min-height:26px}button{font:inherit;padding:10px;background:#243449;color:inherit;border:1px solid #65778d;border-radius:8px;cursor:pointer}details{margin:18px 0}summary{cursor:pointer}tr.highlight{background:#243449}
+</style></head><body><main>
+<nav aria-label="Main"><a href="/">Model scores</a><a href="/providers">Provider charts</a><a href="https://console.darkbloom.dev/leaderboard" rel="noreferrer">Official leaderboard</a></nav>
+<h1>Leaderboard investigator</h1><p>Public account rankings and experimental machine-activity comparisons. <strong>Similar traffic is not proof of account ownership.</strong> No API keys or account credentials are collected.</p>
+<p id="status" role="status" aria-live="polite">Loading public observations…</p>
+<section class="panel"><h2>Possible single-computer matches</h2><p id="progress">Waiting for synchronized observations.</p>
+<p>We compare increases in cumulative <strong>all-time paid jobs</strong> against observed machine request increases. This avoids old jobs dropping out of a rolling 24-hour total. Only hourly checkpoints with source timestamps within two minutes are used.</p>
+<div class="table"><table><thead><tr><th>Account pseudonym</th><th>Candidate hardware</th><th>Latest reported model</th><th>Count agreement</th><th>Correlation</th><th>Intervals</th><th>Assessment</th></tr></thead><tbody id="candidates"></tbody></table></div>
+<p id="empty">No candidates yet. That is not evidence that an account has no machines.</p>
+<details><summary>Method and limits</summary><p>At least six valid approximately hourly intervals, 90% machine sample coverage, 100 paid jobs, varying activity, correlation ≥ 0.90 and total absolute count error ≤ 15% are required. Agreement is a count-comparison metric, not an ownership probability. Close runner-up machines are marked ambiguous. Missing accounts are not counted as zero; negative counter changes, gaps, resets and partial legacy job counts are excluded.</p><p>Only the public top 200 all-time job accounts can be compared. One account can own multiple computers; this version does not search arbitrary machine combinations. Free/self-routed requests, settlement lag, source timing, pseudonym collisions and similar workloads can prevent or confuse matches. A model label is the latest public observation—not an account’s complete model mix. Checkpoints are retained for 14 days; comparisons use at most the latest 24 intervals. No private fleet links are listed.</p></details>
+</section>
+<section class="panel" id="validation" hidden><h2>Known-fleet validation</h2><p>This owner-supplied reference fleet is used to measure errors—not to declare other accounts matched or apply one fleet’s ratios to everyone.</p><p id="validation-status"></p></section>
+<section class="panel"><h2>Public earnings · rolling 24 hours</h2><label for="search">Filter by account pseudonym</label><p><input id="search" placeholder="e.g. burning-crab-7474" autocomplete="off" spellcheck="false"></p>
+<div class="table"><table><thead><tr><th>Rank</th><th>Pseudonym</th><th>Work earnings</th><th>Reported rewards</th><th>Total earnings</th><th>Paid jobs</th><th>Input + output tokens</th></tr></thead><tbody id="rankings"></tbody></table></div>
+<p>The source reports actual account-level totals, not our token-price revenue estimates. Zero reported rewards does not independently prove that an account received no base rewards.</p>
+</section></main><script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const usd=n=>'$'+(n/1e6).toFixed(4), num=n=>Number(n).toLocaleString();
+let data;
+function render(){
+ if(!data)return;const query=$('#search').value.trim().toLowerCase();
+ $('#rankings').innerHTML=data.entries.filter(r=>r.pseudonym.toLowerCase().includes(query)).map(r=>`<tr><td>${num(r.rank)}</td><td>${esc(r.pseudonym)}</td><td class="num">${usd(r.work_earnings_micro_usd)}</td><td class="num">${usd(r.reward_earnings_micro_usd)}</td><td class="num">${usd(r.earnings_micro_usd)}</td><td class="num">${num(r.jobs)}</td><td class="num">${num(r.tokens)}</td></tr>`).join('');
+ const candidates=data.candidates.filter(r=>r.pseudonym.toLowerCase().includes(query));
+ $('#candidates').innerHTML=candidates.map(r=>`<tr><td>${esc(r.pseudonym)}</td><td><a href="${esc(r.public_page)}">${esc(r.chip)} · ${esc(r.ram??'?')} GB</a></td><td>${esc(r.latest_model||'Unknown')}</td><td class="num">${r.agreement.toFixed(1)}%</td><td class="num">${r.correlation.toFixed(3)}</td><td>${num(r.intervals)}</td><td class="tag">${r.ambiguous?'Ambiguous resemblance':'Unconfirmed candidate'}</td></tr>`).join('');
+ $('#empty').hidden=candidates.length>0;
+ $('#progress').textContent=`${data.checkpoints} hourly checkpoints captured · ${data.minimum_intervals} valid intervals required before a candidate can appear (roughly 6–7 hours minimum while feeds are healthy). ${data.matching_stale?'No recent synchronized checkpoint; matching is waiting.':`Latest checkpoint: ${new Date(data.last_checkpoint*1000).toLocaleString()}.`}`;
+ const age=data.updated_at?new Date(data.updated_at*1000).toLocaleString():'not captured yet';
+ $('#status').textContent=[data.warning,data.stale?'Source unavailable or stale; previous values are not live.':null,`Leaderboard source: ${age}. Refreshes every minute.`].filter(Boolean).join(' ');
+ if(data.validation){$('#validation').hidden=false;const v=data.validation;$('#validation-status').textContent=`${v.intervals} valid reference intervals · ${num(v.paid_jobs)} paid jobs vs ${num(v.observed_requests)} observed requests${v.relative_error==null?'':` · ${(v.relative_error*100).toFixed(1)}% absolute count error`}. ${v.status==='collecting'?'Collecting evidence; not validated yet.':'Measured discrepancy, not a guarantee of matching accuracy.'}`;}
+}
+async function load(){try{const response=await fetch('/api/leaderboard');if(!response.ok)throw Error();data=await response.json();render();}catch{$('#status').textContent='Could not refresh the leaderboard. Any values below are from the previous successful refresh.';}}
+$('#search').addEventListener('input',render);load();setInterval(load,60000);
+</script></body></html>

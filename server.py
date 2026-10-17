@@ -11,6 +11,8 @@ import argparse
 import csv
 import json
 import math
+import hashlib
+import base64
 import os
 import signal
 import sqlite3
@@ -25,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from provider_pages import ProviderPages, load_pages
+from leaderboard import Leaderboard
 
 from warm_model_manager import (
     DEFAULT_BASE_URL,
@@ -420,6 +423,26 @@ class ScoreService:
         self.provider_error = None
         self._providers_lock = threading.Lock()
         self._providers_cache = OrderedDict()
+        self.leaderboard = Leaderboard(store.path) if self.provider_pages.track_all else None
+        self._leaderboard_lock = threading.Lock()
+        self._leaderboard_cache = None
+        self._leaderboard_next_refresh = 0
+
+    def read_leaderboard(self):
+        if self.leaderboard is None:
+            return json.dumps(dict(entries=[],candidates=[],checkpoints=0,minimum_intervals=6,
+                updated_at=None,stale=True,matching_stale=True,warning='Public fleet collection is not enabled on this installation.')).encode()
+        with self._leaderboard_lock:
+            cached = self._leaderboard_cache
+            if cached is None or time.monotonic() >= cached[0]:
+                fleet=os.environ.get('LEADERBOARD_VALIDATION_FLEET')
+                name=os.environ.get('LEADERBOARD_VALIDATION_PSEUDONYM')
+                keys=self.provider_pages.fleet_keys(fleet) if fleet and self.provider_pages.enabled else None
+                fingerprints=[hashlib.sha256(base64.b64decode(key)).hexdigest() for key in keys] if keys else None
+                body = json.dumps(self.leaderboard.read(int(time.time()),fingerprints,name),separators=(',',':'),allow_nan=False).encode()
+                cached = (time.monotonic()+60, body)
+                self._leaderboard_cache = cached
+            return cached[1]
 
     def read_providers(self, slug=None, search='', offset=0):
         key=(slug,search,offset)
@@ -503,6 +526,25 @@ class ScoreService:
                     if self.prices.last_error:
                         prices = {}  # Do not price new hours with stale rates.
                     self.provider_pages.capture(payload, prices, now,attestation,self.prices.fetched_at)
+                    # Reuse validated public hourly usage; never store raw polls.
+                    if self.provider_pages.track_all:
+                        try:
+                            self.leaderboard.observe(sample_at)
+                            if now >= self._leaderboard_next_refresh:
+                                self._leaderboard_next_refresh=now+60
+                                daily=get_json('https://api.darkbloom.dev/v1/leaderboard?metric=earnings&window=24h&limit=200')
+                                self.leaderboard.capture_daily(daily,int(time.time()))
+                                try:
+                                    cumulative=get_json('https://api.darkbloom.dev/v1/leaderboard?metric=jobs&window=all&limit=200')
+                                    self.leaderboard.capture(daily,cumulative,sample_at,int(time.time()))
+                                except (RuntimeError,OSError,ValueError,KeyError,TypeError):
+                                    self._leaderboard_next_refresh=now+300
+                                    self.leaderboard.error='Cumulative leaderboard unavailable; daily rankings are preserved. Activity matching is waiting for that public feed.'
+                        except (RuntimeError,OSError,sqlite3.Error,ValueError,KeyError,TypeError):
+                            self._leaderboard_next_refresh=now+300
+                            self.leaderboard.error='Leaderboard comparison could not refresh; previous observations are preserved.'
+                        with self._leaderboard_lock:
+                            self._leaderboard_cache=None
                     # Network failures must not discard otherwise valid provider
                     # counter observations. Missing ratios/calibration stay unknown.
                     network_error=None
@@ -540,6 +582,13 @@ class ScoreHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in ('/leaderboard','/leaderboard/'):
+            self.send_bytes(WEB_PATH.with_name('leaderboard.html').read_bytes(),'text/html; charset=utf-8')
+            return
+        if parsed.path == '/api/leaderboard':
+            self.send_bytes(self.server.service.read_leaderboard(),'application/json; charset=utf-8',
+                            cache_control='public, max-age=0, s-maxage=30')
+            return
         if parsed.path in ('/providers','/providers/','/api/providers') and self.server.service.provider_pages.track_all:
             if parsed.path!='/api/providers':
                 self.send_bytes(WEB_PATH.with_name('provider-directory.html').read_bytes(),'text/html; charset=utf-8')

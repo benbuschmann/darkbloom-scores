@@ -261,6 +261,29 @@ For Dokploy, configure the JSON environment variable on the application and
 redeploy with the existing persistent `/data` volume. Configuration is not
 shipped inside the image. Do not upload account responses or credentials.
 
+### v0.6.0 — public leaderboard investigator
+
+`/leaderboard` shows the shared public 24-hour earnings ranking. Experimental
+single-machine candidates compare increases in all-time account paid-job counts
+with validated machine request increases. This is not an ownership lookup and
+does not discover arbitrary multi-machine fleets. All-time top-200 coverage is
+limited, and that upstream feed may be unavailable even while daily rankings work.
+
+Collection runs with `TRACK_ALL_PUBLIC_PROVIDERS=1`. Hourly checkpoints require
+source timestamps within 120 seconds. At least six valid intervals, 90% sample
+coverage and varying nontrivial activity are needed. Gaps, resets, disappearing
+rankings and ambiguous runner-ups are not silently converted into matches.
+Checkpoint history is retained for 14 days; comparisons use the latest 24 intervals.
+There are no raw poll archives or per-viewer upstream requests. Existing provider
+and score histories and Cloudflare caching remain unchanged.
+
+Optional private deployment configuration can set `LEADERBOARD_VALIDATION_FLEET`
+to an existing user-created fleet slug and `LEADERBOARD_VALIDATION_PSEUDONYM` to
+its known leaderboard pseudonym. Only aggregate validation counts/errors appear
+on the public page; the fleet slug, machine list and account ID are not returned.
+The reference measures error; it does not train a universal revenue multiplier or
+change thresholds for other accounts. No account credentials are used.
+
 ### v0.5.0 — public estimates and accounting guardrails
 
 Provider collection uses `https://api.darkbloom.dev/v1/stats` directly and its

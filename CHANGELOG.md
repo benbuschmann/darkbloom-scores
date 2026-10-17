@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0 — 2026-10-16
+
+- Add /leaderboard with public 24-hour account rankings and an experimental
+  single-machine activity comparison. Never label similarities as ownership.
+- Compare all-time paid-job increases, not changes in rolling daily totals.
+  Retain hourly synchronized checkpoints for 14 days, plus bounded latest
+  reconciliation baselines; reuse validated provider usage instead of raw polls.
+- Require six valid variable-activity intervals, source alignment, sample coverage,
+  reset/gap checks and ambiguity warnings. Missing rankings never mean zero.
+- Optional owner-supplied validation fleet measures aggregate count error only;
+  no private keys, account credentials or fleet membership lists are published.
+- Preserve daily rankings if the cumulative upstream feed fails; back off on
+  failure and show that comparisons are waiting. Preserve existing history.
+
 ## 0.4.0 — 2026-10-08
 
 - Optional all-public-provider collection from one shared minute stats pull,
