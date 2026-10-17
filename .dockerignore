@@ -3,6 +3,8 @@
 !fetch_manager.py
 !server.py
 !provider_pages.py
+!leaderboard.py
+!leaderboard.html
 !providers.html
 !provider-directory.html
 !provider-charts.js

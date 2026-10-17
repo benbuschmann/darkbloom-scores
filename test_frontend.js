@@ -14,6 +14,9 @@ test('leaderboard emphasizes uncertainty, independent public data and safe rende
   assert.match(html,/Ambiguous resemblance/);
   assert.match(html,/esc\(r.pseudonym\)/);
   assert.doesNotMatch(html,/Authorization|localStorage|sessionStorage|fleet-[a-f0-9]{32}/);
+  const allowed=fs.readFileSync(path.join(__dirname,'.dockerignore'),'utf8');
+  assert.match(allowed,/!leaderboard\.html/);
+  assert.match(allowed,/!leaderboard\.py/);
 });
 
 test('provider JSON import extracts only public keys locally and rejects incomplete lists', () => {
